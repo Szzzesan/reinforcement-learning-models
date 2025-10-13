@@ -11,16 +11,6 @@ class ForagingEnvironment(BaseEnvironment):
         self.CONTEXT_PORT = 0
         self.GAMBLING_PORT = 1
 
-    def _initialize_custom_gambling_dist(self, cumulative=8., starting=1.):
-        def exp_decreasing(x, c, s):
-            a = s
-            b = a / c
-            density = a / np.exp(b * x)
-            return density
-        raw_density = exp_decreasing(self.time_bins, c=cumulative, s=starting)
-        self.gambling_pmf = raw_density / 10
-        self.gambling_cdf = np.cumsum(self.gambling_pmf)
-
     def env_init(self, env_info={}):
         """
         Setup the environment with parameters.
@@ -43,89 +33,113 @@ class ForagingEnvironment(BaseEnvironment):
 
         self.rand_generator = np.random.RandomState(env_info.get("seed", 0))
 
-        # --- Pre-calculate reward probabilities ---
-        precision = str(self.dt)[::-1].find('.')
-        self.time_bins = np.round(np.arange(0, self.gambling_max_time + self.dt, self.dt), precision)
-
-        # This helper method handles the normalization and CDF calculation
-        self._initialize_custom_gambling_dist(
-            cumulative=self.gambling_cumulative,
-            starting=self.gambling_starting
-        )
-
-    def _calculate_gambling_reward(self):
+    def _get_gambling_reward_prob(self, time_in_port):
         """
-        Calculates if a reward should be delivered based on the custom hazard rate.
+        Calculates the independent probability of reward at a given time
         """
-        if self.time_in_port >= self.gambling_max_time:
-            return 0.0
-
-        time_idx = int(self.time_in_port / self.dt)
-
-        prob_never_rewarded_yet = 1 - self.gambling_cdf[time_idx]
-        prob_reward_at_this_instant = self.gambling_pmf[time_idx]  # PMF value is already scaled by dt implicitly
-
-        if prob_never_rewarded_yet > 1e-9:
-            hazard_rate = prob_reward_at_this_instant / prob_never_rewarded_yet
-            if self.rand_generator.uniform() < hazard_rate:
-                return 1.0
-
-        return 0.0
+        a = self.gambling_starting
+        b = a / self.gambling_cumulative
+        raw_prob = a / np.exp(b * time_in_port)
+        prob_this_step = raw_prob * self.dt
+        if not (0 <= prob_this_step <= 1):
+            raise ValueError(
+                f"Calculated probability is outside the valid [0, 1] range.\n"
+                f"  - Calculated Value: {prob_this_step}\n"
+                f"  - Time in Port: {time_in_port}s\n"
+                f"This is likely caused by the combination of the parameters.\n"
+                f"Please check: starting={self.gambling_starting}, cumulative={self.gambling_cumulative}, dt={self.dt}"
+            )
+        return prob_this_step
 
     def env_start(self):
         self.total_time_elapsed = 0
         self.current_context = self.rand_generator.choice([0, 1])
+
+        # Initialize state variables
         self.port_id = self.CONTEXT_PORT
         self.time_in_port = 0.0
+        self.event_timer = 0.0 # time since the last significant event
         self.rewards_in_context = 0
         self.is_traveling = False
+        self.gambling_port_disabled = False
+        self.time_since_last_context_reward = 0.0
+
         return self._get_observation()
 
     def env_step(self, action):
         reward = 0.0
         self.total_time_elapsed += self.dt
-        if self.total_time_elapsed % self.block_duration < self.dt:
+        if self.total_time_elapsed > 0 and self.total_time_elapsed % self.block_duration < self.dt:
             self.current_context = 1 - self.current_context
         terminal = self.total_time_elapsed >= self.session_duration
+        interval = self.low_rate_interval if self.current_context == 0 else self.high_rate_interval
 
         if self.is_traveling:
             self.time_in_port += self.dt
+            self.event_timer += self.dt
             if self.time_in_port >= self.travel_time:
                 self.is_traveling = False
                 self.time_in_port = 0.0
+                self.event_timer = 0.0
                 self.port_id = 1 - self.port_id
 
         elif action == 0:  # Stay
             self.time_in_port += self.dt
+            self.event_timer += self.dt
 
             if self.port_id == self.CONTEXT_PORT:
-                interval = self.low_rate_interval if self.current_context == 0 else self.high_rate_interval
-                next_reward_time = (self.rewards_in_context + 1) * interval
-                if self.rewards_in_context < self.context_rewards_max and abs(self.time_in_port - next_reward_time) < (
-                        self.dt / 2):
+                time_to_wait = interval - self.time_since_last_context_reward
+                if self.rewards_in_context < self.context_rewards_max and self.event_timer >= time_to_wait:
                     reward = 1.0
                     self.rewards_in_context += 1
+                    self.event_timer = 0.0  # Reset port timer after each reward
+                    self.time_since_last_context_reward = 0.0  # Reset resume timer
+
+                    if self.rewards_in_context == self.context_rewards_max:
+                        self.gambling_port_disabled = False
 
             elif self.port_id == self.GAMBLING_PORT:
-                reward = self._calculate_gambling_reward()
+                # --- Gambling is now on the flag ---
+                if not self.gambling_port_disabled:
+                    prob = self._get_gambling_reward_prob(self.time_in_port)
+                    if self.rand_generator.uniform() < prob:
+                        reward = 1.0
+                        self.event_timer = 0.0
 
         elif action == 1:  # Leave
+            if self.port_id == self.CONTEXT_PORT:
+                # --- Check for premature leave ---
+                if self.rewards_in_context < self.context_rewards_max:
+                    self.gambling_port_disabled = True
+                    # Store the elapsed time in the current interval to be used for resume
+                    self.time_since_last_context_reward = self.event_timer
+                else: # Left after finishing, reset everything
+                    self.rewards_in_context = 0
+                    self.time_since_last_context_reward = 0.0
+
             self.is_traveling = True
             self.time_in_port = 0.0
-            if self.port_id == self.CONTEXT_PORT:
-                self.rewards_in_context = 0
+            self.event_timer = 0.0
 
         next_observation = self._get_observation()
         return (reward, next_observation, terminal)
 
     def _get_observation(self):
         current_port = 2 if self.is_traveling else self.port_id
-        return np.array([current_port, self.time_in_port, self.current_context, self.rewards_in_context])
+        gambling_disabled_feature = 1.0 if self.gambling_port_disabled else 0.0
+        return np.array([
+            current_port,
+            self.time_in_port,
+            self.event_timer,
+            self.current_context,
+            self.rewards_in_context,
+            gambling_disabled_feature
+        ])
 
     def env_cleanup(self):
         pass
 
     def env_message(self, message):
         if message == "get_num_features":
-            return 4
+            return 6
         return None
