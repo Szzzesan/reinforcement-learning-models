@@ -6,6 +6,7 @@ class ForagingEnvironment(BaseEnvironment):
     """
     An RL environment for a patch-foraging task.
     """
+
     def __init__(self):
         super().__init__()
         self.CONTEXT_PORT = 0
@@ -13,11 +14,12 @@ class ForagingEnvironment(BaseEnvironment):
 
     def env_init(self, env_info={}):
         """
-        Setup the environment with parameters.
+        Set up the environment with parameters.
         """
         # --- time ---
         self.dt = env_info.get("time_step_duration", 0.1)
-        self.travel_time = env_info.get("travel_time", 1.0)
+        self.travel_time = env_info.get("travel_time",
+                                        0.4)  # minimum duration animals need to travel (to prevent teleporting)
         self.session_duration = env_info.get("session_duration_min", 18) * 60
         self.block_duration = env_info.get("block_duration_min", 3) * 60
 
@@ -58,11 +60,17 @@ class ForagingEnvironment(BaseEnvironment):
         # Initialize state variables
         self.port_id = self.CONTEXT_PORT
         self.time_in_port = 0.0
-        self.event_timer = 0.0 # time since the last significant event
+        self.event_timer = 0.0  # time since the last significant event
         self.rewards_in_context = 0
-        self.is_traveling = False
+
         self.gambling_port_disabled = False
         self.time_since_last_context_reward = 0.0
+
+        self.is_traveling = False
+        self.destination_port = None
+
+        self.trial_number = 1
+        self.block_switching_pending = False
 
         return self._get_observation()
 
@@ -70,18 +78,28 @@ class ForagingEnvironment(BaseEnvironment):
         reward = 0.0
         self.total_time_elapsed += self.dt
         if self.total_time_elapsed > 0 and self.total_time_elapsed % self.block_duration < self.dt:
-            self.current_context = 1 - self.current_context
+            self.block_switching_pending = True
+
         terminal = self.total_time_elapsed >= self.session_duration
         interval = self.low_rate_interval if self.current_context == 0 else self.high_rate_interval
 
         if self.is_traveling:
             self.time_in_port += self.dt
             self.event_timer += self.dt
-            if self.time_in_port >= self.travel_time:
+            if (action == 1) and (self.time_in_port >= self.travel_time):
+                if self.destination_port == self.CONTEXT_PORT:
+                    if not self.gambling_port_disabled:
+                        self.trial_number += 1
+                        if self.block_switching_pending:
+                            self.current_context = 1 - self.current_context
+                            self.block_switching_pending = False
                 self.is_traveling = False
                 self.time_in_port = 0.0
                 self.event_timer = 0.0
-                self.port_id = 1 - self.port_id
+                self.port_id = self.destination_port
+                self.destination_port = None
+            else:
+                pass
 
         elif action == 0:  # Stay
             self.time_in_port += self.dt
@@ -89,7 +107,8 @@ class ForagingEnvironment(BaseEnvironment):
 
             if self.port_id == self.CONTEXT_PORT:
                 time_to_wait = interval - self.time_since_last_context_reward
-                if self.rewards_in_context < self.context_rewards_max and self.event_timer >= time_to_wait:
+                if (self.rewards_in_context < self.context_rewards_max) and (
+                        self.event_timer - self.dt < time_to_wait) and (self.event_timer >= time_to_wait):
                     reward = 1.0
                     self.rewards_in_context += 1
                     self.event_timer = 0.0  # Reset port timer after each reward
@@ -99,23 +118,28 @@ class ForagingEnvironment(BaseEnvironment):
                         self.gambling_port_disabled = False
 
             elif self.port_id == self.GAMBLING_PORT:
-                # --- Gambling is now on the flag ---
                 if not self.gambling_port_disabled:
                     prob = self._get_gambling_reward_prob(self.time_in_port)
                     if self.rand_generator.uniform() < prob:
                         reward = 1.0
                         self.event_timer = 0.0
+                        # print(
+                        #     f"*** Gambling Reward delivered at total_time: {self.total_time_elapsed:.2f}s, time_in_port: {self.time_in_port:.2f}s ***")
 
         elif action == 1:  # Leave
             if self.port_id == self.CONTEXT_PORT:
+                self.destination_port = self.GAMBLING_PORT
+
                 # --- Check for premature leave ---
                 if self.rewards_in_context < self.context_rewards_max:
                     self.gambling_port_disabled = True
-                    # Store the elapsed time in the current interval to be used for resume
                     self.time_since_last_context_reward = self.event_timer
-                else: # Left after finishing, reset everything
+                else:  # Left after finishing, reset everything
                     self.rewards_in_context = 0
                     self.time_since_last_context_reward = 0.0
+
+            elif self.port_id == self.GAMBLING_PORT:
+                self.destination_port = self.CONTEXT_PORT
 
             self.is_traveling = True
             self.time_in_port = 0.0
@@ -142,4 +166,6 @@ class ForagingEnvironment(BaseEnvironment):
     def env_message(self, message):
         if message == "get_num_features":
             return 6
+        if message == "get_trial_number":
+            return self.trial_number
         return None
