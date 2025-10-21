@@ -2,6 +2,7 @@ import os
 import config
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 
 
 def load_behavior_data(animal_id, session_id=None, session_long_name=None):
@@ -86,6 +87,7 @@ def convert_behavior_data_to_state_transitions(df, env_params):
     is_traveling = False
     travel_timer = 0.0
     current_port_id = -1  # Start with invalid port
+    last_port_event_type = None # 'entry' or 'exit'
 
     print("Processing time steps...")
     num_steps = len(df_resampled)
@@ -114,29 +116,76 @@ def convert_behavior_data_to_state_transitions(df, env_params):
         exit_event = events_in_interval[
             (events_in_interval['key'] == 'head') & (events_in_interval['value'] == 0.0)
             ]
+        reward_event = events_in_interval[
+            (events_in_interval['key'] == 'reward') & (events_in_interval['value'] == 1.0)
+        ]
+        trial_start_event = events_in_interval[
+            (events_in_interval['key'] == 'trial') & (events_in_interval['value'] == 1.0)
+        ]
 
-        # State Determination Logic:
-        if not entry_event.empty:  # Entered a port *during* this interval
-            is_traveling = False
-            travel_timer = 0.0  # Reset travel timer upon entry
-            current_port_id = port_map.get(entry_event['port'].iloc[0], -1)
-            time_in_port_t = 0.0  # Just entered
-            event_timer_t = 0.0
-            last_reward_time_in_port = t  # Start event timer from entry
-            if current_port_id == 0:
-                rewards_in_context = 0  # Reset context rewards on entry
-        elif is_traveling:  # Was already traveling before this interval started
+        # Filter potential double entry
+        entry_event_valid = False
+        if not entry_event.empty:
+            if last_port_event_type != 'entry':  # Only process entry if last event wasn't also an entry
+                entry_event_valid = True
+                entry_port_data = port_map.get(entry_event['port'].iloc[0], -1)
+                last_port_event_type = 'entry'
+            # else: print(f"Ignoring double entry at t={t:.2f}") # Optional: for debugging
+
+        exit_event_valid = False
+        if not exit_event.empty:
+            exit_event_valid = True
+            leaving_port_data = port_map.get(exit_event['port'].iloc[0], -1)
+            last_port_event_type = 'exit'
+
+        # --- Determine State Action at time t ---
+        action_t = 0
+
+        if not trial_start_event.empty:
+            # reset these parameters if a new trial starts
+            rewards_in_context = 0
+            gambling_disabled = False
+            current_port_id = port_map.get(trial_start_event['port'].iloc[0], -1)
+
+        if is_traveling:  # Was already traveling before this interval started
             current_port_id = 2  # Traveling state
             time_in_port_t = travel_timer  # Use the timer value from *previous* step end
             event_timer_t = travel_timer  # Event timer also counts travel time? Or reset? Let's keep it counting travel time.
             travel_timer += dt  # Increment for *this* interval
-        else:  # Was in a port before this interval started
+            if entry_event_valid:
+                action_t = 1
+                is_traveling = False
+                time_in_port_t = row_t['time_in_port'] if pd.notna(row_t['time_in_port']) else 0.0
+                event_timer_t = 0.0
+                last_reward_time_in_port = t
+        elif exit_event_valid:
+            action_t = 1
+            current_port_id = leaving_port_data
+            time_in_port_t = row_t['time_in_port'] if pd.notna(row_t['time_in_port']) else 0.0
+            event_timer_t = 0.0
+
+            is_traveling = True
+            travel_timer = 0.0
+            if current_port_id == 0 and rewards_in_context < context_rewards_max:
+                gambling_disabled = True
+        else:  # staying in a port (or initial state)
+            is_traveling = False
             current_port_id = port_map.get(row_t['port'],
                                            0 if i == 0 else current_port_id)  # Persist last known port if ffill failed
             time_in_port_t = row_t['time_in_port'] if pd.notna(row_t['time_in_port']) else (
                 time_in_port_t + dt if i > 0 else 0.0)  # Increment if no event
-            event_timer_t = max(0.0, t - last_reward_time_in_port)
 
+            if last_reward_time_in_port == -np.inf:  # If no reward/entry has happened yet
+                event_timer_t = time_in_port_t  # Timer should track time since entry (which is time_in_port here)
+            else:
+                event_timer_t = max(0.0, t - last_reward_time_in_port)
+
+            action_t = 0
+            if i == 0 and not trial_start_event.empty and current_port_id == 0:
+                rewards_in_context = 0
+                last_reward_time_in_port = t
+
+        current_context = 0 if row_t['phase'] == '0.4' else 1
         obs_t = np.array([
             float(current_port_id),
             round(time_in_port_t, 3),
@@ -146,24 +195,9 @@ def convert_behavior_data_to_state_transitions(df, env_params):
             float(gambling_disabled)
         ])
 
-        # --- Determine Action at time t ---
-        # todo: right now action only records leaving, but doesn't record entering (which is a decision to leave the traveling port)
-        action_t = 0  # Default: Stay (or continue traveling implicitly)
-        if not exit_event.empty:  # Exited a port *during* this interval
-            action_t = 1  # Leave action occurred at time t
-            is_traveling = True  # Will be traveling in the next state
-            leaving_port = current_port_id  # The port just exited
-            travel_timer = 0.0  # Start timer *after* this step
-            # Update gambling_disabled if leaving context port early
-            if leaving_port == 0 and rewards_in_context < context_rewards_max:
-                gambling_disabled = True
-
         # --- Determine Reward received between t and t_next ---
         reward_t_plus_1 = 0.0
-        reward_events = events_in_interval[
-            (events_in_interval['key'] == 'reward') & (events_in_interval['value'] == 1.0)
-            ]
-        if not reward_events.empty:
+        if not reward_event.empty:
             reward_t_plus_1 = 1.0
             # Only update reward counters/timers if *not* currently traveling
             if not is_traveling:
@@ -174,53 +208,48 @@ def convert_behavior_data_to_state_transitions(df, env_params):
                         gambling_disabled = False
 
         # --- Determine Next State (obs_t_plus_1) ---
-        # Look ahead one step in the resampled data
-        if i + 1 < num_steps:
-            row_t_next = df_resampled.iloc[i + 1]
-            next_context_from_data = 0 if row_t_next['phase'] == '0.4' else 1
-        else:  # Handle the very last step
-            row_t_next = row_t  # Assume state persists if no more data
-            next_context_from_data = current_context
-
         # Determine next state based on *current* calculations
         next_port_id_calc = current_port_id
         next_time_in_port_calc = time_in_port_t + dt
         next_event_timer_calc = event_timer_t + dt
         next_rewards_in_context_calc = rewards_in_context
         next_gambling_disabled_calc = gambling_disabled
-        next_context_calc = current_context
+
+        # Look ahead one step in the resampled data
+        if i + 1 < num_steps:
+            row_t_next = df_resampled.iloc[i + 1]
+            next_context_calc = 0 if row_t_next['phase'] == '0.4' else 1
+        else:  # Handle the very last step
+            row_t_next = row_t  # Assume state persists if no more data
+            next_context_calc = current_context
+
+        # Adjust next state based on *current step's* action/events
+        if action_t == 1 and is_traveling:  # If EXIT just occurred
+            next_port_id_calc = 2
+            next_time_in_port_calc = 0.0
+            next_event_timer_calc = 0.0
+        elif action_t == 1 and not is_traveling:  # If ENTRY just occurred (must be is_actual_port_entry)
+            next_port_id_calc = entry_port_data
+            next_time_in_port_calc = 0.0
+            next_event_timer_calc = 0.0
+            # rewards_in_context reset logic is now handled based on trial start
+        elif is_traveling:  # Still traveling
+            next_port_id_calc = 2
+            next_time_in_port_calc = travel_timer
+            next_event_timer_calc = travel_timer
+
+        # Reset event timer for next state if reward occurred
+        if reward_t_plus_1 > 0 and not is_traveling and current_port_id != 2:
+            next_event_timer_calc = 0.0
 
         # Check for upcoming block switch *after* this interval
         if t_next > 0 and t_next % block_duration < dt:
-            next_context_calc = 1 - current_context
-
-        if action_t == 1:  # If we just decided to leave
-            next_port_id_calc = 2  # Next state is traveling
-            next_time_in_port_calc = 0.0  # Travel timer starts now
-            next_event_timer_calc = 0.0
-            # rewards_in_context remains as is until entry event
-        elif is_traveling:  # If we were traveling *during* this interval
-            # Check if *next* interval contains an entry event
-            next_entry_events = event_df[
-                (event_df['task_time'] >= t_next) &
-                (event_df['task_time'] < t_next + dt) &
-                (event_df['key'] == 'head') &
-                (event_df['value'] == 1.0)
-                ]
-            if not next_entry_events.empty:  # Arrival happens in the next step
-                next_port_id_calc = port_map.get(next_entry_events['port'].iloc[0], -1)
-                next_time_in_port_calc = 0.0
-                next_event_timer_calc = 0.0
-                if next_port_id_calc == 0:
-                    next_rewards_in_context_calc = 0  # Reset context rewards on entry
-            else:  # Still traveling
-                next_port_id_calc = 2
-                next_time_in_port_calc = travel_timer  # Use the updated timer
-                next_event_timer_calc = travel_timer  # Continue counting
-
-        # If reward occurred, reset next event timer
-        if reward_t_plus_1 > 0 and not is_traveling:  # Only if not traveling
-            next_event_timer_calc = 0.0
+            phase_at_t = row_t['phase']
+            phase_after_t_next_events = event_df[event_df['task_time'] >= t_next]['phase']
+            if not phase_after_t_next_events.empty:
+                phase_at_t_next = phase_after_t_next_events.iloc[0]
+                if phase_at_t != phase_at_t_next:
+                    next_context_calc = 1 - current_context
 
         obs_t_plus_1 = np.array([
             float(next_port_id_calc),
@@ -237,10 +266,6 @@ def convert_behavior_data_to_state_transitions(df, env_params):
 
         # --- Append Transition ---
         transitions.append((obs_t, action_t, reward_t_plus_1, obs_t_plus_1, terminal_flag))
-
-        # Update last known port for next iteration's entry detection
-        if current_port_id != 2:  # Don't update last_port_id while traveling
-            last_port_id = current_port_id
 
     print(f"Processed {len(transitions)} time steps.")
     return transitions
