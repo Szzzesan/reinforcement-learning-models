@@ -1,0 +1,19 @@
+# .gitignore
+
+# Ignore temporary development/testing files
+scratch.py
+config.py
+.ipynb_checkpoints
+
+# Ignore other common Python files/folders
+__pycache__/
+*.pyc
+.idea/
+.vscode/
+venv/
+
+# Ignore middle-step data products
+.pkl
+.png
+.npy
+.pdf
