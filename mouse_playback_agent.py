@@ -10,7 +10,7 @@ class MousePlaybackAgent(BaseAgent):
         self.step_size = agent_info.get("step_size", 0.1)
 
         self.num_tilings = agent_info.get("num_tilings", 8)
-        self.tiles_per_dim = agent_info.get("tiles_per_dim", [4, 4, 4, 2, 5, 2])  # Corresponds to the 6 state features
+        self.tiles_per_dim = agent_info.get("tiles_per_dim", [4, 30, 10, 2, 5, 2])  # Corresponds to the 6 state features
 
         # The Index Hash Table (IHT) stores the tile indices. The size determines memory usage.
         self.iht_size = agent_info.get("iht_size", 4096)
@@ -21,7 +21,7 @@ class MousePlaybackAgent(BaseAgent):
 
         # State feature scales for the tile coder. These normalize the inputs.
         # [port, time_in_port, event_timer, context, rewards_in_context, gambling_disabled]
-        self.scales = [
+        default_scales = [
             1 / 2.0,  # Port ID (0, 1, 2)
             1 / agent_info.get("gambling_max_time_s", 30.0),  # Time in Port
             1 / agent_info.get("gambling_max_time_s", 10.0),  # Event Timer
@@ -29,6 +29,8 @@ class MousePlaybackAgent(BaseAgent):
             1 / agent_info.get("context_rewards_max", 4),  # Rewards in Context
             1 / 1.0  # Gambling Disabled (0, 1)
         ]
+
+        self.scales = agent_info.get("scales", default_scales)
 
         self.last_state_tiles = None
         self.td_error_log = []
