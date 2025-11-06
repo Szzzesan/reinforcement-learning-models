@@ -24,7 +24,7 @@ class MousePlaybackAgent(BaseAgent):
         self.scales = [
             1 / 2.0,  # Port ID (0, 1, 2)
             1 / agent_info.get("gambling_max_time_s", 30.0),  # Time in Port
-            1 / agent_info.get("gambling_max_time_s", 30.0),  # Event Timer
+            1 / agent_info.get("gambling_max_time_s", 10.0),  # Event Timer
             1 / 1.0,  # Context (0, 1)
             1 / agent_info.get("context_rewards_max", 4),  # Rewards in Context
             1 / 1.0  # Gambling Disabled (0, 1)
