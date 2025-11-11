@@ -39,16 +39,16 @@ def load_pretraining_data(animal_id, session_id=None, session_long_name=None):
         print(f"Warning: Directory not found at {dir}")
         return None
     if session_long_name is not None:
-        target_filename = f"{animal_id}_{session_long_name}_pi_events_processed.parquet"
+        target_filename = f"{animal_id}_{session_long_name}_pi_events_proccessed.parquet"
     elif session_id is not None:
         matching_files = [
             f for f in os.listdir(dir)
-            if f.startswith(f"{animal_id}") and f.endswith("_pi_events_processed.parquet")
+            if f.startswith(f"{animal_id}") and f.endswith("_pi_events_proccessed.parquet")
         ]
         matching_files.sort()
         if not 0 <= session_id < len(matching_files):
             print(f"Error: session_id '{session_id}' is out of bounds.")
-            print(f"Found {len(matching_files)} sessions for '{animal_id}' with data product 'pi_events_processed'.")
+            print(f"Found {len(matching_files)} sessions for '{animal_id}' with data product 'pi_events_proccessed'.")
             # For debugging, see what files were found:
             # print("Found files:", matching_files)
             return None
@@ -80,6 +80,7 @@ def convert_behavior_data_to_state_transitions(df, env_params):
     ] ***
     """
     # --- Extract necessary parameters ---
+    print(f"Test new conversion function 5th go...")
     dt = env_params.get("time_step_duration", 0.1)
     session_duration = env_params.get("session_duration_min", 18) * 60
     context_rewards_max = env_params.get("context_rewards_max", 4)
@@ -117,6 +118,8 @@ def convert_behavior_data_to_state_transitions(df, env_params):
     travel_timer = 0.0
     current_port_id = -1  # Start with invalid port
     last_port_event_type = None # 'entry' or 'exit'
+    context_time_in_port = 0.0
+    context_event_timer = 0.0
 
     print("Processing time steps...")
     num_steps = len(df_resampled)
@@ -133,11 +136,13 @@ def convert_behavior_data_to_state_transitions(df, env_params):
             row_t = df_resampled.iloc[i]  # Get initial phase/context
             current_context = 0 if row_t['phase'] == '0.4' else 1
             rewards_in_context = 0
-            gambling_disabled = False
+            gambling_disabled = True
             is_traveling_at_start_of_t = False  # Start in a port
             last_event_time_in_port = 0.0
             travel_timer = 0.0
             last_port_event_type = 'entry'  # Assume session start is an entry
+            context_time_in_port = 0.0
+            context_event_timer = 0.0
             # --- End Initial State Logic ---
         else:
             # --- Get state from the end of the previous transition ---
@@ -227,15 +232,22 @@ def convert_behavior_data_to_state_transitions(df, env_params):
         # --- Apply effects of Trial Start event occurring in [t, t+dt) ---
         if not trial_start_event.empty:
             next_rewards_in_context = 0
-            next_gambling_disabled = False
+            next_gambling_disabled = True
             last_event_time_in_port = t  # Trial start resets the timer base
+            context_time_in_port = 0.0
+            context_event_timer = 0.0
 
         # --- Apply effects of Action action_t occurring in [t, t+dt) ---
         if action_t == 1:  # If an entry or exit happened
             if is_traveling_at_start_of_t:  # Must be an ENTRY
                 next_port_id = entry_port_data
-                next_time_in_port = 0.0
-                next_event_timer = 0.0
+                if (entry_port_data == 0) and (trial_start_event.empty):
+                    # Restore sticky timers if entering context and it's NOT a new trial
+                    next_time_in_port = context_time_in_port + dt
+                    next_event_timer = context_event_timer + dt
+                else:
+                    next_time_in_port = 0.0
+                    next_event_timer = 0.0
                 last_event_time_in_port = t  # Entry is a significant event
                 next_is_traveling = False
                 current_travel_timer = 0.0
@@ -246,9 +258,15 @@ def convert_behavior_data_to_state_transitions(df, env_params):
                 last_event_time_in_port = t  # Exit is a significant event
                 next_is_traveling = True
                 current_travel_timer = 0.0
-                # Update gambling disabled if exiting context port early
-                if port_id_t == 0 and rewards_in_context < context_rewards_max:
+
+                if port_id_t == 0:
+                    # save the timers for context port within the same trial
+                    context_time_in_port = time_in_port_t
+                    context_event_timer = event_timer_t
+                if port_id_t == 1:
+                    # once leaving the gambling port, they cannot come back
                     next_gambling_disabled = True
+
         else:  # If action_t == 0 (stay or continue traveling)
             if is_traveling_at_start_of_t:  # Continue traveling
                 current_travel_timer += dt
@@ -259,6 +277,10 @@ def convert_behavior_data_to_state_transitions(df, env_params):
                 next_time_in_port = time_in_port_t + dt
                 next_event_timer = event_timer_t + dt
                 # next_is_traveling remains False
+                if port_id_t == 0:
+                    # update the context port sticky timers as well
+                    context_time_in_port = next_time_in_port
+                    context_event_timer = next_event_timer
 
         # --- Apply effects of Reward reward_t_plus_1 occurring in [t, t+dt) ---
         if reward_t_plus_1 > 0:
@@ -268,6 +290,7 @@ def convert_behavior_data_to_state_transitions(df, env_params):
                 next_event_timer = 0.0  # Reset event timer for the state *after* reward
                 if port_id_t == 0:  # If reward was in context port
                     next_rewards_in_context += 1
+                    context_event_timer = 0
                     if next_rewards_in_context >= context_rewards_max:
                         next_gambling_disabled = False  # Enable gambling
 
