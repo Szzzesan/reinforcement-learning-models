@@ -45,9 +45,16 @@ class MousePlaybackAgent(BaseAgent):
 
         # Get the indices of the active tiles for this state
         active_tiles = tc.tiles(self.iht, self.num_tilings, scaled_features)
-
-        # The value is the sum of the weights of the active tiles
         return np.sum(self.w[active_tiles])
+
+    def get_active_tiles(self, state_features):
+        """
+        Get the weights of the active tiles based on the state features.
+        """
+        # Scale the continuous features to be in [0, 1] for the tile coder
+        scaled_features = [f * s for f, s in zip(state_features, self.scales)]
+        active_tiles = tc.tiles(self.iht, self.num_tilings, scaled_features)
+        return self.w[active_tiles]
 
     def agent_start(self, observation):
         """The first method called when the experiment starts."""
