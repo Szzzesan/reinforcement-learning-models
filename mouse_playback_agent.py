@@ -47,7 +47,7 @@ class MousePlaybackAgent(BaseAgent):
         active_tiles = tc.tiles(self.iht, self.num_tilings, scaled_features)
         return np.sum(self.w[active_tiles])
 
-    def get_active_tiles(self, state_features):
+    def get_weights(self, state_features):
         """
         Get the weights of the active tiles based on the state features.
         """
