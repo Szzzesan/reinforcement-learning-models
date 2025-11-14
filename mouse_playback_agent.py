@@ -10,7 +10,6 @@ class MousePlaybackAgent(BaseAgent):
         self.step_size = agent_info.get("step_size", 0.1)
 
         self.num_tilings = agent_info.get("num_tilings", 8)
-        self.tiles_per_dim = agent_info.get("tiles_per_dim", [4, 30, 10, 2, 5, 2])  # Corresponds to the 6 state features
 
         # The Index Hash Table (IHT) stores the tile indices. The size determines memory usage.
         self.iht_size = agent_info.get("iht_size", 4096)
@@ -22,12 +21,12 @@ class MousePlaybackAgent(BaseAgent):
         # State feature scales for the tile coder. These normalize the inputs.
         # [port, time_in_port, event_timer, context, rewards_in_context, gambling_disabled]
         default_scales = [
-            1 / 2.0,  # Port ID (0, 1, 2)
-            1 / agent_info.get("gambling_max_time_s", 30.0),  # Time in Port
-            1 / agent_info.get("gambling_max_time_s", 10.0),  # Event Timer
-            1 / 1.0,  # Context (0, 1)
-            1 / agent_info.get("context_rewards_max", 4),  # Rewards in Context
-            1 / 1.0  # Gambling Disabled (0, 1)
+            -1,  # Port ID (0, 1, 2)
+            1 / 2.0,  # Time in Port
+            0.0,  # Event Timer (disabled)
+            -1,  # Context (0, 1)
+            -1,  # Rewards in Context
+            -1  # Gambling Disabled (0, 1)
         ]
 
         self.scales = agent_info.get("scales", default_scales)
@@ -36,31 +35,52 @@ class MousePlaybackAgent(BaseAgent):
         self.td_error_log = []
 
     # Helper function to get the value of a state using the tile coder
+    def _get_active_tiles(self, raw_state):
+        """
+                Takes the raw state vector and returns the list of active tiles.
+                """
+
+        my_floats = []
+        my_ints = []
+
+        # Loop through the raw state and your scales list
+        for i, raw_val in enumerate(raw_state):
+            scale = self.scales[i]  # Get the scale for this feature
+
+            if scale > 0.0:
+                # 1. It's a FLOAT. Scale it and add to floats list.
+                my_floats.append(raw_val * scale)
+            elif scale < 0.0:
+                # 2. It's an INT. Add the raw value (unscaled) to ints list.
+                my_ints.append(int(raw_val))
+            else:
+                # 3. scale == 0.0, so it's DISABLED. Do nothing.
+                pass
+
+        # Now, call the 'tiles' function from tiles3.py with your sorted lists
+        active_tiles = tc.tiles(self.iht, self.num_tilings, my_floats, my_ints)
+
+        return active_tiles
+
     def get_value(self, state_features):
         """
         Calculates the state-value estimate using the current weights and active tiles.
         """
-        # Scale the continuous features to be in [0, 1] for the tile coder
-        scaled_features = [f * s for f, s in zip(state_features, self.scales)]
 
-        # Get the indices of the active tiles for this state
-        active_tiles = tc.tiles(self.iht, self.num_tilings, scaled_features)
+        active_tiles = self._get_active_tiles(state_features)
         return np.sum(self.w[active_tiles])
 
     def get_weights(self, state_features):
         """
         Get the weights of the active tiles based on the state features.
         """
-        # Scale the continuous features to be in [0, 1] for the tile coder
-        scaled_features = [f * s for f, s in zip(state_features, self.scales)]
-        active_tiles = tc.tiles(self.iht, self.num_tilings, scaled_features)
+        active_tiles = self._get_active_tiles(state_features)
         return self.w[active_tiles]
 
     def agent_start(self, observation):
         """The first method called when the experiment starts."""
         # Get the active tiles for the initial state
-        scaled_features = [f * s for f, s in zip(observation, self.scales)]
-        self.last_state_tiles = tc.tiles(self.iht, self.num_tilings, scaled_features)
+        self.last_state_tiles = self._get_active_tiles(observation)
 
         # No action is returned because the experiment loop will provide it.
         return None
@@ -86,8 +106,7 @@ class MousePlaybackAgent(BaseAgent):
             self.w[tile_index] += update_size
 
         # Update the last state's tiles for the next iteration
-        scaled_features = [f * s for f, s in zip(observation, self.scales)]
-        self.last_state_tiles = tc.tiles(self.iht, self.num_tilings, scaled_features)
+        self.last_state_tiles = self._get_active_tiles(observation)
 
         # No action is returned as we are in playback mode.
         return None
