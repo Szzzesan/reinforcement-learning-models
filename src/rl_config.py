@@ -7,7 +7,9 @@ ENV_PARAMS = {
     "travel_time": 0.4,
     "session_duration_min": 18,
     "context_rewards_max": 4,
-    "block_duration_min": 3
+    "block_duration_min": 3,
+    "gambling_cumulative": 8.0,
+    "gambling_starting": 1.0,
 }
 
 # --- State Representation Scales ---

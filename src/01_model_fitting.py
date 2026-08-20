@@ -17,10 +17,12 @@ from src.data_loader import load_pooled_transitions
 import src.config as config
 
 from src.rl_config import AGENT_INFO_TEMPLATE
-from src.state_utils import build_travel_state, build_investment_sim_state, is_investment_state
+from src.state_utils import (build_travel_state, build_investment_sim_state, is_investment_state,
+                             get_investment_reward_prob)
 
 random.seed(43)
 np.random.seed(43)
+
 
 def validate_leave_time_error_visual(transitions, agent_info, test_alphas=[0.001, 0.02, 0.1], num_trials=10):
     """
@@ -223,7 +225,7 @@ def quick_mc_predict(trial_data, agent, dt=0.1, max_extrap=20.0, num_sims=5):
 
         while c_time < (actual_leave_time + max_extrap):
             c_time += dt
-            if random.random() < exp_decreasing_prob(c_time):
+            if random.random() < get_investment_reward_prob(c_time):
                 c_timer = 0.0
             else:
                 c_timer += dt
@@ -547,6 +549,7 @@ def get_next_alphas(best_a, prev_alphas, min_alpha=0.0001, max_alpha=0.01):
 
     return sorted(list(set(clipped_grid)))
 
+
 def get_next_gammas(best_g, prev_gammas):
     """Calculates the next gamma grid, rounded to 2 decimal places, bounded [0.5, 1.0]."""
     prev_gammas = sorted(list(set(prev_gammas)))
@@ -558,7 +561,7 @@ def get_next_gammas(best_g, prev_gammas):
         elif idx == len(prev_gammas) - 1:
             d = prev_gammas[-1] - prev_gammas[-2]
         else:
-            d = min(best_g - prev_gammas[idx-1], prev_gammas[idx+1] - best_g)
+            d = min(best_g - prev_gammas[idx - 1], prev_gammas[idx + 1] - best_g)
     else:
         d = 0.1
 
@@ -632,7 +635,6 @@ def process_animal(animal_id, parameter_dict):
     print("Starting Grid Search...")
     with tqdm(total=len(combinations), desc=f"🔍 {animal_id} Grid", leave=False, unit="pair") as pbar:
         for a, g in combinations:
-
             # nvg = calculate_normalized_value_gap([a, g], all_transitions)
             mse_error = calculate_leave_time_error_postsurg_only([a, g], all_transitions)
 
@@ -772,6 +774,7 @@ def visualize_random_trials(transitions, agent_info, best_params, num_samples=10
     plt.tight_layout()
     plt.show()
 
+
 def verify_exit_states(animal_id="SZ036", num_trials=15):
     """
     Compares the theoretical build_travel_state() against the empirical next_obs
@@ -829,6 +832,7 @@ def verify_exit_states(animal_id="SZ036", num_trials=15):
             if trials_found >= num_trials:
                 break
 
+
 def main():
     # --- PATH SETUP ---
     animal_list = ["SZ036", "SZ037", "SZ038", "SZ039", "SZ042", "SZ043", "RK007", "RK008"]
@@ -847,7 +851,6 @@ def main():
             # --- ROUND 1 (Coarse Map) ---
             current_alphas = [0.0001, 0.001, 0.01]
             current_gammas = [0.5, 0.7, 0.9]
-
 
             for round_num in range(1, MAX_ROUNDS + 1):
 

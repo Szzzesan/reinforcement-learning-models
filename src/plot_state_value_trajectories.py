@@ -11,7 +11,7 @@ import random
 import math
 import tiles3 as tc
 
-from src.state_utils import build_investment_sim_state, build_travel_state, is_investment_state
+from src.state_utils import build_investment_sim_state, build_travel_state, is_investment_state, get_investment_reward_prob
 import src.config as config
 from mouse_playback_environment import MousePlaybackEnvironment
 
@@ -576,15 +576,6 @@ def plot_prediction_results_scatters(results, jitter_amount=0.04, animal_id=None
     plt.show()
 
 
-# reward probability as a function of t (current time in port)
-def exp_decreasing(t, cumulative=8., starting=1.):
-    a = starting
-    b = a / cumulative
-    density = a / np.exp(b * t)
-    prob = density / 10
-    return prob
-
-
 def evaluate_frozen_trajectories_for_animal(animal_id):
     """
     Pipeline-ready wrapper to execute the full frozen evaluation for one animal.
@@ -615,7 +606,7 @@ def evaluate_frozen_trajectories_for_animal(animal_id):
 
     # plot_target_session_trajectories_with_mc(
     #     trials, agent, animal_id,
-    #     reward_prob_func=exp_decreasing,
+    #     reward_prob_func=get_investment_reward_prob,
     #     trial_indices=None,
     #     num_mc_traces=100
     # )
@@ -623,7 +614,7 @@ def evaluate_frozen_trajectories_for_animal(animal_id):
     # 4. Predict Leave Times
     results = []
     for trial in trials:
-        pred_time = predict_leave_time_monte_carlo(trial, agent, exp_decreasing, num_simulations=100)
+        pred_time = predict_leave_time_monte_carlo(trial, agent, get_investment_reward_prob, num_simulations=100)
         actual_time = trial['times'][-1]
 
         results.append({
@@ -678,7 +669,7 @@ def compile_all_animal_predictions(animal_ids, num_mc_sims=100):
             pred_time = predict_leave_time_monte_carlo(
                 trial,
                 agent,
-                exp_decreasing,
+                get_investment_reward_prob,
                 num_simulations=num_mc_sims
             )
             actual_time = trial['times'][-1]

@@ -1,5 +1,6 @@
 import numpy as np
 from src.environment import BaseEnvironment
+from src.state_utils import get_investment_reward_prob
 
 
 class ForagingEnvironment(BaseEnvironment):
@@ -39,19 +40,12 @@ class ForagingEnvironment(BaseEnvironment):
         """
         Calculates the independent probability of reward at a given time
         """
-        a = self.gambling_starting
-        b = a / self.gambling_cumulative
-        raw_prob = a / np.exp(b * time_in_port)
-        prob_this_step = raw_prob * self.dt
-        if not (0 <= prob_this_step <= 1):
-            raise ValueError(
-                f"Calculated probability is outside the valid [0, 1] range.\n"
-                f"  - Calculated Value: {prob_this_step}\n"
-                f"  - Time in Port: {time_in_port}s\n"
-                f"This is likely caused by the combination of the parameters.\n"
-                f"Please check: starting={self.gambling_starting}, cumulative={self.gambling_cumulative}, dt={self.dt}"
-            )
-        return prob_this_step
+        return get_investment_reward_prob(
+            time_in_port,
+            cumulative=self.gambling_cumulative,
+            starting=self.gambling_starting,
+            dt=self.dt
+        )
 
     def env_start(self):
         self.total_time_elapsed = 0
