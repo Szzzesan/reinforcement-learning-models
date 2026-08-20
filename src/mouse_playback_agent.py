@@ -1,22 +1,26 @@
 import numpy as np
-from agent import BaseAgent
+from src.agent import BaseAgent
 import tiles3 as tc
 
 
 class MousePlaybackAgent(BaseAgent):
     def agent_init(self, agent_info={}):
         """Setup for the agent called when the experiment first starts."""
-        self.discount = agent_info.get("discount", 0.95)
-        self.step_size = agent_info.get("step_size", 0.1)
+        self.discount = agent_info.get("discount", 0.65)
+        self.step_size = agent_info.get("step_size", 0.004)
+
+        self.lambda_ = agent_info.get("lambda", 0.95) #NEW: added for td-lambda
 
         self.num_tilings = agent_info.get("num_tilings", 8)
 
         # The Index Hash Table (IHT) stores the tile indices. The size determines memory usage.
-        self.iht_size = agent_info.get("iht_size", 4096)
+        self.iht_size = agent_info.get("iht_size", 32768)
         self.iht = tc.IHT(self.iht_size)
 
         # The weight vector. One weight for each possible tile.
         self.w = np.zeros(self.iht_size)
+
+        self.z = np.zeros(self.iht_size) #NEW: added for TD-lambda (the eligibility trace vector)
 
         # State feature scales for the tile coder. These normalize the inputs.
         # [port, time_in_port, event_timer, context, rewards_in_context, gambling_disabled]
@@ -25,7 +29,7 @@ class MousePlaybackAgent(BaseAgent):
             1 / 2.0,  # Time in Port
             0.0,  # Event Timer (disabled)
             -1,  # Context (0, 1)
-            -1,  # Rewards in Context
+            0,  # Rewards in Context
             -1  # Gambling Disabled (0, 1)
         ]
 
@@ -58,7 +62,7 @@ class MousePlaybackAgent(BaseAgent):
                 pass
 
         # Now, call the 'tiles' function from tiles3.py with your sorted lists
-        active_tiles = tc.tiles(self.iht, self.num_tilings, my_floats, my_ints)
+        active_tiles = tc.tiles(self.iht_size, self.num_tilings, my_floats, my_ints) # we will see if changing self.iht to self.iht_size will work
 
         return active_tiles
 
@@ -82,6 +86,8 @@ class MousePlaybackAgent(BaseAgent):
         # Get the active tiles for the initial state
         self.last_state_tiles = self._get_active_tiles(observation)
 
+        self.z.fill(0.0) #NEW: added for td-lambda (wipe the memory clean for a new episode)
+
         # No action is returned because the experiment loop will provide it.
         return None
 
@@ -98,12 +104,28 @@ class MousePlaybackAgent(BaseAgent):
         td_error = reward + self.discount * v_next_state - v_last_state
         self.td_error_log.append(td_error)
 
-        # Perform gradient descent update.
-        # The update is applied to the weights of the tiles active in the *last* state.
-        # Normalize the step size by the number of tilings for stability.
-        update_size = self.step_size / self.num_tilings * td_error
+        ## --- NEW: TD(lambda) Update Logic ---
+        # 1. Decay the entire trace vector
+        self.z *= self.discount * self.lambda_
+
+        # 2. Add the current state to the trace (Accumulating Trace)
         for tile_index in self.last_state_tiles:
-            self.w[tile_index] += update_size
+            self.z[tile_index] += 1.0
+
+        # 3. Apply the TD-error to ALL weights based on their trace
+        update_size = self.step_size / self.num_tilings * td_error
+        self.w += update_size * self.z
+        # ------------------------------------
+
+        ## --- OLD: TD(0) Update Logic ---
+        # # Perform gradient descent update.
+        # # The update is applied to the weights of the tiles active in the *last* state.
+        # # Normalize the step size by the number of tilings for stability.
+        # update_size = self.step_size / self.num_tilings * td_error
+        # for tile_index in self.last_state_tiles:
+        #     self.w[tile_index] += update_size
+        #
+        # ------------------------------------
 
         # Update the last state's tiles for the next iteration
         self.last_state_tiles = self._get_active_tiles(observation)
@@ -119,9 +141,20 @@ class MousePlaybackAgent(BaseAgent):
         td_error = reward + self.discount * 0 - v_last_state
         self.td_error_log.append(td_error)
 
-        update_size = self.step_size / self.num_tilings * td_error
+        # --- NEW: Terminal Update ---
+        self.z *= self.discount * self.lambda_
         for tile_index in self.last_state_tiles:
-            self.w[tile_index] += update_size
+            self.z[tile_index] += 1.0
+
+        update_size = self.step_size / self.num_tilings * td_error
+        self.w += update_size * self.z
+        # ----------------------------
+
+        ## --- OLD: Terminal Update for TD(0) ---
+        # update_size = self.step_size / self.num_tilings * td_error
+        # for tile_index in self.last_state_tiles:
+        #     self.w[tile_index] += update_size
+        # ------------------------------------
 
     def agent_cleanup(self):
         self.last_state_tiles = None

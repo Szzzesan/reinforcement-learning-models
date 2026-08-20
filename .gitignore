@@ -1,22 +1,28 @@
 # .gitignore
 
-# Ignore temporary development/testing files
+# Temporary development/testing files
 scratch.py
-config.py
-.ipynb_checkpoints
+src/config.py
+.ipynb_checkpoints/
 
-# Ignore other common Python files/folders
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+venv/
+.venv/
+
+# IDE
 .idea/
 .vscode/
-venv/
-.xml
-.iml
+*.iml
 
-# Ignore middle-step data products
-.pkl
-.png
-.npy
-.pdf
-.docx
+# Data products and figures
+*.pkl
+*.npy
+*.parquet
+*.png
+*.pdf
+*.docx
+data/
+outputs/
+plots/

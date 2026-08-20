@@ -1,5 +1,5 @@
 import numpy as np
-from environment import BaseEnvironment
+from src.environment import BaseEnvironment
 
 
 class ForagingEnvironment(BaseEnvironment):

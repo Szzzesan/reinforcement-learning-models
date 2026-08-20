@@ -1,7 +1,9 @@
 import os
+import pickle
 from src import config
 import numpy as np
 import pandas as pd
+from pathlib import Path
 
 
 def load_behavior_data(animal_id, session_id=None, session_long_name=None):
@@ -61,7 +63,7 @@ def load_pretraining_data(animal_id, session_id=None, session_long_name=None):
     return pd.read_parquet(file_path)
 
 
-def convert_behavior_data_to_state_transitions(df, env_params):
+def convert_behavior_data_to_state_transitions(df, env_params, is_circular=True):
     """
     This function parses raw behavioral data file and return a
     list of transition tuples for one complete session.
@@ -119,6 +121,7 @@ def convert_behavior_data_to_state_transitions(df, env_params):
     last_port_event_type = None # 'entry' or 'exit'
     context_time_in_port = 0.0
     context_event_timer = 0.0
+    last_visited_port = 0 # NEW: Memory of the last port occupied
 
     print("Processing time steps...")
     num_steps = len(df_resampled)
@@ -251,6 +254,7 @@ def convert_behavior_data_to_state_transitions(df, env_params):
                 next_is_traveling = False
                 current_travel_timer = 0.0
             else:  # Must be an EXIT
+                last_visited_port = port_id_t  # NEW: Save the port we are leaving
                 next_port_id = 2  # Start traveling
                 next_time_in_port = 0.0
                 next_event_timer = 0.0
@@ -314,7 +318,20 @@ def convert_behavior_data_to_state_transitions(df, env_params):
         # --------
 
         # --- Determine Terminal Flag ---
-        terminal_flag = (i == num_steps - 1) or (t_next >= session_duration)
+        # 1. Standard session termination
+        is_session_end = (i == num_steps - 1) or (t_next >= session_duration)
+
+        # 2. STATE-BASED Non-circular termination
+        is_arriving_at_context = is_traveling_at_start_of_t and (action_t == 1) and (entry_port_data == 0)
+
+        # 3. Check if the mouse completed its required work before gambling
+        # (If False, they are just returning from a premature check to finish their chores)
+        completed_work = (rewards_in_context >= context_rewards_max)
+
+        # ONLY terminate if arriving at Context FROM Gambling AFTER completing the work
+        is_trial_end = (not is_circular) and is_arriving_at_context and (last_visited_port == 1) and completed_work
+
+        terminal_flag = is_session_end or is_trial_end
         # --------
 
         # 7. Append Transition
@@ -329,14 +346,175 @@ def convert_behavior_data_to_state_transitions(df, env_params):
     return transitions
 
 
-if __name__ == '__main__':
-    pi_events = load_behavior_data("SZ036", session_id=5)
+def verify_gambling_exit_termination(animal_id="SZ036", session_id=5):
+    print(f"--- Running Verification on {animal_id} Session {session_id} ---")
+
+    # 1. Setup Environment Parameters
     env_params = {
         "time_step_duration": 0.1,
-        "travel_time": 0.4,
         "session_duration_min": 18,
         "context_rewards_max": 4,
         "block_duration_min": 3
     }
-    transitions = convert_behavior_data_to_state_transitions(pi_events, env_params)
+
+    # 2. Load exactly one raw dataframe
+    df = load_behavior_data(animal_id, session_id=session_id)
+    if df is None:
+        print("Could not load data. Check animal/session ID.")
+        return
+
+    # 3. Process the transitions with the NEW Non-Circular logic
+    print("Converting to transitions (is_circular=False)...")
+    transitions = convert_behavior_data_to_state_transitions(df, env_params, is_circular=False)
+
+    # 4. Audit the Terminations
+    terminal_count = 0
+    print("\n--- AUDITING TERMINAL STATES ---")
+    for i, transition in enumerate(transitions):
+        obs_t, action_t, reward_t_plus_1, obs_t_plus_1, terminal_flag = transition
+
+        if terminal_flag:
+            terminal_count += 1
+
+            # We only want to print the first 3 terminations so we don't flood your console
+            if terminal_count <= 3:
+                print(f"\nTerminal Event #{terminal_count} found at index {i}:")
+                print(f"  Step N-2: {np.round(transitions[i - 2][0], 2)} (Action: {transitions[i - 2][1]})")
+                print(f"  Step N-1: {np.round(transitions[i - 1][0], 2)} (Action: {transitions[i - 1][1]})")
+                print(f"  Step N  : {np.round(obs_t, 2)} (Action: {action_t}) -> TERMINAL!")
+
+                # Check what the immediate next state is (Start of the new episode)
+                if i + 1 < len(transitions):
+                    print(f"  New Ep  : {np.round(transitions[i + 1][0], 2)}")
+
+    print(f"\nTotal Trials (Terminal Flags) detected in this session: {terminal_count}")
+
+
+def load_pooled_transitions(data_folder, animal_id, type='pretraining'):
+    """
+    Loads the giant transition array for a specific animal.
+    """
+    if type == 'pretraining':
+        file_path = os.path.join(data_folder, f"pooled_transitions_{animal_id}.pkl")
+    elif type == 'target':
+        file_path = os.path.join(data_folder, f"target_sessions_pooled_transitions_{animal_id}.pkl")
+
+    try:
+        with open(file_path, 'rb') as f:
+            transitions = pickle.load(f)
+        print(f"Successfully loaded {len(transitions)} transitions for {animal_id}.")
+        return transitions
+    except FileNotFoundError:
+        print(f"❌ Error: File not found at {file_path}")
+        return None
+    except Exception as e:
+        print(f"❌ Error loading agent: {e}")
+        return None
+
+
+def load_and_concat_population_data(animal_ids, file_name):
+    """
+    Loads 'tde_reward_features_{animal_id}.parquet' for each animal in the list
+    and concatenates them into a single DataFrame.
+
+    Args:
+        animal_ids (list): List of animal ID strings (e.g., ['SZ036', 'RK007']).
+        file_name (str): Name of file to load.
+
+    Returns:
+        pd.DataFrame: A single concatenated DataFrame with an 'animal_id' column added.
+    """
+    # Define the root path
+    project_root = Path(config.MODELING_PROJECT_ROOT)
+    data_dir = project_root / Path(config.STEP3_EVALUATION_METRICS_SUBDIR)
+
+
+    all_data = []
+
+    print(f"📂 Loading TDE data for {len(animal_ids)} animals from: {data_dir}")
+
+    for animal in animal_ids:
+        file_path = data_dir / f"{file_name}_{animal}.parquet"
+
+        try:
+            # Load the individual animal's data
+            df = pd.read_parquet(file_path)
+
+            # Add an identifier column so we can distinguish them in the big plot
+            df['animal'] = animal
+
+            all_data.append(df)
+            print(f"   ✅ Loaded {animal}: {len(df)} rows")
+
+        except FileNotFoundError:
+            print(f"   ❌ Warning: File not found for {animal} at {file_path}")
+        except Exception as e:
+            print(f"   ❌ Error loading {animal}: {e}")
+
+    if not all_data:
+        print("⚠️ No data loaded.")
+        return pd.DataFrame()
+
+    # Concatenate all into one big DataFrame
+    combined_df = pd.concat(all_data, ignore_index=True)
+
+    print(f"🎉 Combined DataFrame created with {len(combined_df)} total rows.")
+    return combined_df
+
+if __name__ == '__main__':
+    # pi_events = load_behavior_data("SZ007", session_id=5)
+    # env_params = {
+    #     "time_step_duration": 0.1,
+    #     "travel_time": 0.4,
+    #     "session_duration_min": 18,
+    #     "context_rewards_max": 4,
+    #     "block_duration_min": 3
+    # }
+    # transitions = convert_behavior_data_to_state_transitions(pi_events, env_params)
+
+    ## test target transitions and pretraining transitions
+    # project_root = Path(os.getcwd()).parent
+    # data_path = project_root / "data"
+    # target_transitions = load_pooled_transitions(data_path, 'SZ036', type='target')
+    # pretraining_transitions = load_pooled_transitions(data_path, 'SZ036', type='pretraining')
+
+    ## test circular flag
+    # 1. Load sample data
+    animal_id = "SZ036"  # Change this to an animal/session you know has good data
+    session_id = 5
+    print(f"--- Testing Terminal Flag Logic for {animal_id}, Session {session_id} ---")
+    pi_events = load_behavior_data(animal_id, session_id=session_id)
+
+    if pi_events is not None:
+        env_params = {
+            "time_step_duration": 0.1,
+            "travel_time": 0.4,
+            "session_duration_min": 18,
+            "context_rewards_max": 4,
+            "block_duration_min": 3
+        }
+
+        # 2. Test Condition A: Circular (Continuous) - Your original model
+        print("\n>>> Running Circular Model (is_circular=True)...")
+        transitions_circular = convert_behavior_data_to_state_transitions(
+            pi_events, env_params, is_circular=True
+        )
+        # The terminal flag is the 5th element in the tuple (index 4)
+        terminals_circular = sum([1 for t in transitions_circular if t[4] == True])
+
+        # 3. Test Condition B: Episodic (One-Shot) - The new counter-model
+        print("\n>>> Running Episodic Model (is_circular=False)...")
+        transitions_episodic = convert_behavior_data_to_state_transitions(
+            pi_events, env_params, is_circular=False
+        )
+        terminals_episodic = sum([1 for t in transitions_episodic if t[4] == True])
+
+        # 4. Print Results
+        print("\n================ VERIFICATION RESULTS ================")
+        print(f"Total Steps Processed: {len(transitions_circular)}")
+        print(f"Circular Model Terminal States: {terminals_circular} (Expected: 1, at the very end of session)")
+        print(f"Episodic Model Terminal States: {terminals_episodic} (Expected: ~ Number of trials + 1)")
+        print("======================================================")
+
+    verify_gambling_exit_termination()
     print("hello")
