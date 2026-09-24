@@ -438,10 +438,15 @@ def predict_leave_time_monte_carlo(trial, agent, get_reward_prob_func, num_simul
 
 
 def plot_prediction_results_trial_series(results, animal_id=None, title=None, save_name=None,
-                                         save_subdirs=(), show=True):
+                                         save_subdirs=(), show=True, trials_per_axis=40):
+    """
+    trials_per_axis: trials per row before wrapping to a new row. None puts every trial in a single row
+                     (used for the per-session figures, which have ~50-60 trials).
+    """
     # 1. Configuration
-    trials_per_axis = 40
     num_total = len(results)
+    if trials_per_axis is None:
+        trials_per_axis = max(num_total, 1)
     num_axes = int(np.ceil(num_total / trials_per_axis))
 
     # 2. Extract arrays for easier slicing
@@ -626,6 +631,7 @@ def plot_prediction_results_by_session(results, animal_id, show=False):
             save_name=f"leave_time_trial_series_{animal_id}_session{sid:02d}.png",
             save_subdirs=("leave_time_by_session", animal_id),
             show=show,
+            trials_per_axis=None,  # whole session in one row
         )
 
 
