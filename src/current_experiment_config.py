@@ -5,8 +5,9 @@ from datetime import datetime
 # ==========================================
 # 1. SET ACTIVE EXPERIMENT HERE
 # ==========================================
-# Change this single variable to switch the entire pipeline's context
-ACTIVE_EXP_ID = "exp_05"
+# Change this single variable to switch the entire pipeline's context.
+# run_pipeline.py can override it for one run via the RL_ACTIVE_EXP_ID environment variable.
+ACTIVE_EXP_ID = os.environ.get("RL_ACTIVE_EXP_ID", "exp_06")
 
 # ==========================================
 # 2. PROJECT ROOT & EXPERIMENT CONFIGURATIONS
@@ -41,7 +42,17 @@ EXPERIMENTS = {
         "description": ("Chronological holdout: the last 10 sessions (all post-surgery) are the target set and are never "
                         "seen during fitting. alpha, gamma and lambda are fit on prequential leave-time MSE over "
                         "pre-surgery trials only; early post-surgery training sessions are replayed but not scored. "
-                        "Uniform tiling.")
+                        "Uniform tiling."),
+        "score_session_type": "pre-surgery"
+    },
+    "exp_06": {
+        "split_method": "mixed_50_percent",
+        "tiling_method": "uniform",
+        "description": ("Train = all pre-surgery + first 50% of post-surgery sessions; target = last 50% of post-surgery "
+                        "(odd counts put the extra session in the target set). alpha, gamma and lambda are fit on "
+                        "prequential leave-time MSE over the post-surgery TRAINING sessions only; pre-surgery sessions "
+                        "are replayed but not scored. Uniform tiling."),
+        "score_session_type": "post-surgery"
     }
 }
 

@@ -15,6 +15,7 @@ import multiprocessing
 from src.mouse_playback_agent import MousePlaybackAgent
 from src.data_loader import load_pooled_transitions, load_pooled_transitions_cached
 import src.config as config
+from src.current_experiment_config import ACTIVE_CONFIG
 
 from src.rl_config import AGENT_INFO_TEMPLATE
 from src.state_utils import (build_travel_state, build_investment_sim_state, is_investment_state,
@@ -898,12 +899,14 @@ def verify_exit_states(animal_id="SZ036", num_trials=15):
                 break
 
 
-# --- exp_05 search settings ---
+# --- search settings (exp_05 onward) ---
 MAX_ROUNDS = 4
 ROUND1_ALPHAS = [0.0001, 0.001, 0.01]
 ROUND1_GAMMAS = [0.5, 0.7, 0.9, 0.95, 0.98, 0.99]  # extended top end: exp_01 fits piled up at the old 0.9 edge
 ROUND1_LAMBDAS = [0.0, 0.5, 0.9]
-SCORE_SESSION_TYPE = 'pre-surgery'  # prequential MSE over pre-surgery trials; post-surgery training sessions replayed, not scored
+# Which training sessions count toward the MSE; all training sessions are replayed regardless.
+# Set per experiment in current_experiment_config (exp_05: 'pre-surgery', exp_06: 'post-surgery').
+SCORE_SESSION_TYPE = ACTIVE_CONFIG.get("score_session_type", "pre-surgery")
 # Each worker holds one animal's transitions in RAM (~0.5 GB for RK008, ~1.2 GB for SZ036/SZ037).
 # Lower this if your machine starts swapping.
 N_JOBS = max(1, min(multiprocessing.cpu_count() - 1, 6))
@@ -918,11 +921,16 @@ def load_best_params_if_exists(filename_base="best_params"):
     return {}
 
 
+FAILED_ANIMALS = []  # filled by main(); a non-empty list makes the script exit with code 1 (stops run_pipeline)
+
+
 def main(animal_list=None):
     if animal_list is None:
         animal_list = ["SZ036", "SZ037", "SZ038", "SZ039", "SZ042", "SZ043", "RK007", "RK008"]
 
     best_params = load_best_params_if_exists()
+    print(f"Scoring {SCORE_SESSION_TYPE} training sessions | round-1 grid: "
+          f"{len(ROUND1_ALPHAS)}x{len(ROUND1_GAMMAS)}x{len(ROUND1_LAMBDAS)} | N_JOBS={N_JOBS}")
 
     main_pbar = tqdm(animal_list, desc="🧬 Total Cohort Progress", unit="animal")
     for animal in main_pbar:
@@ -982,13 +990,18 @@ def main(animal_list=None):
 
         except Exception as e:
             tqdm.write(f"❌ Error processing {animal}: {e}")
+            FAILED_ANIMALS.append(animal)
 
+    if FAILED_ANIMALS:
+        print(f"\n❌ Fitting failed for: {FAILED_ANIMALS}")
     return best_params
 
 
 # --- MAIN BLOCK ---
 if __name__ == "__main__":
     main()
+    if FAILED_ANIMALS:
+        raise SystemExit(1)  # so run_pipeline.py does not go on to train agents with missing parameters
 
     # --- QUICK VALIDATION ---
     # PROJECT_ROOT = config.MODELING_PROJECT_ROOT

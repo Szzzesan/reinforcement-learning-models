@@ -1,5 +1,6 @@
 import pandas as pd
 import os
+import re
 
 import pickle
 import glob
@@ -248,10 +249,15 @@ def main():
             train_sessions = annotated_pre
             target_sessions = annotated_post
 
-        elif split_method == "mixed_20_percent":
-            split_idx = int(len(annotated_post) * 0.2)
+        elif re.fullmatch(r"mixed_\d+_percent", split_method):
+            # Train = all pre-surgery + first N% of post-surgery; target = the rest of post-surgery.
+            # int() rounds down, so mixed_20_percent reproduces exp_02 exactly and odd counts give the
+            # extra session to the target set (e.g. RK008: 11 post -> 5 train / 6 target at 50%).
+            frac = int(split_method.split("_")[1]) / 100.0
+            split_idx = int(len(annotated_post) * frac)
             train_sessions = annotated_pre + annotated_post[:split_idx]
             target_sessions = annotated_post[split_idx:]
+            print(f"{animal}: {split_idx} post-surgery sessions in training, {len(target_sessions)} held out.")
 
         elif split_method.startswith("holdout_last_"):
             # Chronological holdout: the last N sessions (pre + post pooled, sorted by date) are the target set.

@@ -657,7 +657,12 @@ def evaluate_frozen_trajectories_for_animal(animal_id, force_extract=False, make
 
     # 1. Extract and Save (only if missing, unless forced)
     traj_file = project_root / Path(config.STEP3_EVALUATION_METRICS_SUBDIR) / f"target_session_value_trajectory_{animal_id}.json"
-    if force_extract or not traj_file.exists():
+    # Also re-extract when the agent (02) or the target transitions (00) are newer than the saved JSON,
+    # so a re-run of the pipeline never reuses trajectories from an older agent.
+    stale = traj_file.exists() and (
+        traj_file.stat().st_mtime < pretrained_agent_file.stat().st_mtime
+        or traj_file.stat().st_mtime < target_data_file.stat().st_mtime)
+    if force_extract or stale or not traj_file.exists():
         trials = extract_target_session_trajectories(target_data_file, pretrained_agent_file)
         if trials:
             save_trajectory_data(trials, animal_id)
