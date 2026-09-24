@@ -8,6 +8,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 import src.config as config
+from src.current_experiment_config import TEST_ALPHA_MODE
 from src.data_loader import load_pooled_transitions
 
 
@@ -485,7 +486,10 @@ def main():
 
 
 if __name__ == "__main__":
-    evaluate_all_animals(override_alpha=0) #override_alpha can be None is we want to use the agent's pretraining alpha
+    # TEST_ALPHA_MODE (current_experiment_config / run_pipeline --test-alpha):
+    #   'frozen'   -> override_alpha=0, weights never change on the target sessions
+    #   'learning' -> override_alpha=None, keep each animal's fitted alpha
+    evaluate_all_animals(override_alpha=0 if TEST_ALPHA_MODE == 'frozen' else None)
 
     # SZ_animals = ['SZ036', 'SZ037', 'SZ038', 'SZ039', 'SZ042', 'SZ043']
     # RK_animals = ['RK007', 'RK008']

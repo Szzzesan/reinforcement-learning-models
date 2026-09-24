@@ -13,6 +13,9 @@ Usage (from PyCharm: just Run this file; or from a terminal at the repo root):
     python run_pipeline.py --from 02              # resume from a step (e.g. after 00/01 already finished)
     python run_pipeline.py --from 03 --to eval    # run a slice
     python run_pipeline.py --list                 # show step names
+    python run_pipeline.py --test-alpha learning --from 03   # redo 03 onward with the fitted alpha kept on the
+                                                             # target sessions (results in */learning_alpha/),
+                                                             # then compare with the frozen run
 
 Notes
 - Figures are rendered off-screen (MPLBACKEND=Agg), so plt.show() does not block the run.
@@ -41,11 +44,12 @@ STEPS = [
     ("trajectories", "src/plot_state_value_trajectories.py"),
     ("eval", "src/evaluate_behavior_fit.py"),
     ("da", "figure_making/plot_DA_vs_temporal_features.py"),
+    ("compare", "src/compare_test_alpha_modes.py"),  # frozen vs learning; skips itself if one mode is missing
 ]
 STEP_NAMES = [name for name, _ in STEPS]
 
 
-def build_env(exp_id=None):
+def build_env(exp_id=None, test_alpha=None):
     env = os.environ.copy()
     # Same import setup as PyCharm: 'from src.x import ...' needs the repo root,
     # 'import tiles3' / 'from mouse_playback_environment import ...' need src/.
@@ -55,13 +59,15 @@ def build_env(exp_id=None):
     env["PYTHONIOENCODING"] = "utf-8"  # the scripts print emoji; avoid cp1252 errors on Windows
     if exp_id is not None:
         env["RL_ACTIVE_EXP_ID"] = exp_id
+    if test_alpha is not None:
+        env["RL_TEST_ALPHA_MODE"] = test_alpha
     return env
 
 
 def resolve_log_path(env):
     """Asks current_experiment_config (with the same env) where this run's dated output folder is."""
-    code = ("from src.current_experiment_config import get_dated_output_dir, ACTIVE_EXP_ID; "
-            "print(ACTIVE_EXP_ID); print(get_dated_output_dir())")
+    code = ("from src.current_experiment_config import get_dated_output_dir, ACTIVE_EXP_ID, TEST_ALPHA_MODE; "
+            "print(ACTIVE_EXP_ID + ' | test alpha: ' + TEST_ALPHA_MODE); print(get_dated_output_dir())")
     out = subprocess.run([sys.executable, "-c", code], cwd=REPO_ROOT, env=env,
                          capture_output=True, text=True, check=True).stdout.strip().splitlines()
     exp_id, out_dir = out[-2], out[-1]
@@ -98,6 +104,9 @@ def main():
     parser.add_argument("--exp", default=None, help="experiment id, e.g. exp_06 (default: ACTIVE_EXP_ID)")
     parser.add_argument("--from", dest="start", default=STEP_NAMES[0], choices=STEP_NAMES)
     parser.add_argument("--to", dest="stop", default=STEP_NAMES[-1], choices=STEP_NAMES)
+    parser.add_argument("--test-alpha", dest="test_alpha", default=None, choices=["frozen", "learning"],
+                        help="alpha on the target sessions for 03 and the trajectories step "
+                             "(default: TEST_ALPHA_MODE in current_experiment_config, i.e. frozen)")
     parser.add_argument("--list", action="store_true", help="list steps and exit")
     args = parser.parse_args()
 
@@ -111,7 +120,7 @@ def main():
         parser.error("--from comes after --to")
     selected = STEPS[i0:i1 + 1]
 
-    env = build_env(args.exp)
+    env = build_env(args.exp, args.test_alpha)
     exp_id, log_path = resolve_log_path(env)
     print(f"Experiment: {exp_id} | steps: {', '.join(n for n, _ in selected)}\nLog: {log_path}")
 

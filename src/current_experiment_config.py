@@ -9,6 +9,17 @@ from datetime import datetime
 # run_pipeline.py can override it for one run via the RL_ACTIVE_EXP_ID environment variable.
 ACTIVE_EXP_ID = os.environ.get("RL_ACTIVE_EXP_ID", "exp_06")
 
+# Test-time learning on the target (held-out) sessions, used by 03 and plot_state_value_trajectories:
+#   'frozen'   -> alpha = 0, the agent's weights never change on the target sessions (default)
+#   'learning' -> keep each animal's fitted alpha, so the agent keeps learning through the target sessions
+# 'learning' results go to a 'learning_alpha' subfolder of 3_evaluation_metrics/ and 4_outputs/<date>/, so both
+# versions coexist. run_pipeline.py can override this for one run via RL_TEST_ALPHA_MODE.
+TEST_ALPHA_MODE = os.environ.get("RL_TEST_ALPHA_MODE", "frozen")
+if TEST_ALPHA_MODE not in ("frozen", "learning"):
+    raise ValueError(f"TEST_ALPHA_MODE must be 'frozen' or 'learning', got {TEST_ALPHA_MODE!r}")
+TEST_ALPHA_SUBFOLDERS = {"frozen": "", "learning": "learning_alpha"}
+TEST_ALPHA_SUBFOLDER = TEST_ALPHA_SUBFOLDERS[TEST_ALPHA_MODE]
+
 # ==========================================
 # 2. PROJECT ROOT & EXPERIMENT CONFIGURATIONS
 # ==========================================
@@ -89,15 +100,26 @@ DIR_FIGURES = DIR_STEP4_OUTPUTS  # old name kept so existing imports keep workin
 RUN_DATE = datetime.now().strftime("%Y_%m_%d")
 
 
-def get_dated_output_dir(*subdirs):
+def get_dated_output_dir(*subdirs, mode_subfolder=True):
     """
     Returns (and creates) outputs/<exp>/4_outputs/<YYYY_MM_DD>/<subdirs...> for the active experiment,
     e.g. get_dated_output_dir() -> .../4_outputs/2026_09_23
          get_dated_output_dir("leave_time_by_session", "SZ036") -> .../4_outputs/2026_09_23/leave_time_by_session/SZ036
+    In 'learning' test-alpha mode the path gains a 'learning_alpha' level right after the date
+    (pass mode_subfolder=False to get the shared dated folder, e.g. for frozen-vs-learning comparisons).
     """
-    path = os.path.join(DIR_STEP4_OUTPUTS, RUN_DATE, *subdirs)
+    parts = [DIR_STEP4_OUTPUTS, RUN_DATE]
+    if mode_subfolder and TEST_ALPHA_SUBFOLDER:
+        parts.append(TEST_ALPHA_SUBFOLDER)
+    path = os.path.join(*parts, *subdirs)
     os.makedirs(path, exist_ok=True)
     return path
+
+def get_eval_metrics_dir(test_alpha_mode=None):
+    """outputs/<exp>/3_evaluation_metrics[/learning_alpha] for the given test-alpha mode (default: active mode)."""
+    sub = TEST_ALPHA_SUBFOLDERS[test_alpha_mode or TEST_ALPHA_MODE]
+    return os.path.join(DIR_EVAL_METRICS, sub) if sub else DIR_EVAL_METRICS
+
 
 def initialize_active_experiment():
     """Creates the necessary directories for the currently active experiment."""

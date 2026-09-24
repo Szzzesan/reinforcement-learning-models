@@ -14,7 +14,7 @@ import tiles3 as tc
 
 from src.state_utils import build_investment_sim_state, build_travel_state, is_investment_state, get_investment_reward_prob
 import src.config as config
-from src.current_experiment_config import get_dated_output_dir
+from src.current_experiment_config import get_dated_output_dir, TEST_ALPHA_MODE
 from mouse_playback_environment import MousePlaybackEnvironment
 
 
@@ -32,15 +32,35 @@ def save_and_show_figure(fig, filename, subdirs=(), show=True, dpi=300):
         plt.close(fig)
 
 
-def extract_target_session_trajectories(target_data_file, pretrained_agent_file):
+def _snapshot_agent(agent):
+    """Cheap copy of the agent whose weights are frozen at this moment (the tile coder is stateless)."""
+    snap = copy.copy(agent)
+    snap.w = agent.w.copy()
+    return snap
+
+
+def extract_target_session_trajectories(target_data_file, pretrained_agent_file, test_alpha_mode=None,
+                                        num_mc_sims=100):
     """
-    Evaluates a frozen agent on target sessions.remote
+    Replays the target sessions through the pretrained agent and, for every investment-port trial, records
+    the V(stay) trajectory, V(leave) and the Monte-Carlo predicted leave time.
+
+    test_alpha_mode: 'frozen'   -> alpha = 0 on the target sessions (weights never change)
+                     'learning' -> keep the fitted alpha, so the agent keeps learning through the target sessions
+                     None       -> use TEST_ALPHA_MODE from current_experiment_config
+    Every trial is predicted with the weights the agent had when the mouse ENTERED the investment port
+    (a snapshot), so in 'learning' mode a trial's prediction never uses anything learned from that trial
+    or later ones. In 'frozen' mode the snapshot is identical to the agent, so results are unchanged.
     """
-    # 1. Load the pre-trained agent and FREEZE learning
+    test_alpha_mode = test_alpha_mode or TEST_ALPHA_MODE
+
+    # 1. Load the pre-trained agent (freeze it unless we are testing with the original alpha)
     print(f"Loading agent from {pretrained_agent_file}...")
     with open(pretrained_agent_file, 'rb') as f:
         agent = pickle.load(f)
-    agent.step_size = 0.0  # Crucial: Prevent weight updates during target evaluation!
+    if test_alpha_mode == 'frozen':
+        agent.step_size = 0.0  # Prevent weight updates during target evaluation
+    print(f"Test-time alpha mode: {test_alpha_mode} (step_size = {agent.step_size})")
 
     # 2. Load the target session data
     print(f"Loading target transitions from {target_data_file}...")
@@ -65,6 +85,7 @@ def extract_target_session_trajectories(target_data_file, pretrained_agent_file)
     current_context = None
     current_session_id = None
     last_gambling_obs = None  # To hold the state right before leaving
+    trial_agent = agent  # weights used to evaluate the current trial (snapshot at trial onset)
 
     obs = env.env_start()
     agent.agent_start(obs)
@@ -72,12 +93,12 @@ def extract_target_session_trajectories(target_data_file, pretrained_agent_file)
     # --- Data Extraction Loop ---
     for step_idx in range(num_total_steps):
         reward, next_obs, terminal = env.env_step(action=None)
-        v_current = agent.get_value(obs)
 
         is_gambling = is_investment_state(obs)
 
         if is_gambling:
             if not in_gambling_trial:  # the first state in gambling port
+                trial_agent = agent if test_alpha_mode == 'frozen' else _snapshot_agent(agent)
                 in_gambling_trial = True
                 current_trial_vs = []
                 current_trial_times = []
@@ -85,25 +106,31 @@ def extract_target_session_trajectories(target_data_file, pretrained_agent_file)
                 current_context = obs[3]
                 current_session_id = session_ids[step_idx]  # obs at this step is transitions[step_idx][0]
 
-            current_trial_vs.append(v_current)
+            current_trial_vs.append(trial_agent.get_value(obs))
             current_trial_times.append(obs[1])
             current_event_timer.append(obs[2])
             last_gambling_obs = obs  # Save this for the threshold calculation!
         else:
             if in_gambling_trial:  # just left the gambling port
                 theoretical_leave_state = build_travel_state(last_gambling_obs)
-                v_after_leaving = agent.get_value(theoretical_leave_state)
+                v_after_leaving = trial_agent.get_value(theoretical_leave_state)
 
                 # Save the completed trial
                 if len(current_trial_vs) > 0:
-                    trials.append({
+                    trial = {
                         'times': current_trial_times,
                         'event_timer': current_event_timer,
                         'values': current_trial_vs,
                         'context': current_context,
                         'v_after': v_after_leaving,
                         'session_id': current_session_id
-                    })
+                    }
+                    # Predict now, with the trial-onset weights (in 'learning' mode the live agent will
+                    # have moved on by the time predictions are compiled).
+                    trial['predicted'] = float(predict_leave_time_monte_carlo(
+                        trial, trial_agent, get_investment_reward_prob, num_simulations=num_mc_sims))
+                    trial['test_alpha_mode'] = test_alpha_mode
+                    trials.append(trial)
                 in_gambling_trial = False
 
         if terminal:
@@ -682,8 +709,8 @@ def evaluate_frozen_trajectories_for_animal(animal_id, force_extract=False, make
 
     # 3. Load Trials and Plot
     trials = load_trajectory_data(animal_id)
-    if trials and 'session_id' not in trials[0]:
-        print(f"   ↻ {animal_id}: trajectory JSON has no session labels, re-extracting...")
+    if trials and ('session_id' not in trials[0] or 'predicted' not in trials[0]):
+        print(f"   ↻ {animal_id}: trajectory JSON predates session labels / stored predictions, re-extracting...")
         trials = extract_target_session_trajectories(target_data_file, pretrained_agent_file)
         save_trajectory_data(trials, animal_id)
 
@@ -697,7 +724,10 @@ def evaluate_frozen_trajectories_for_animal(animal_id, force_extract=False, make
     # 4. Predict Leave Times
     results = []
     for trial in trials:
-        pred_time = predict_leave_time_monte_carlo(trial, agent, get_investment_reward_prob, num_simulations=100)
+        # Stored at extraction with the trial-onset weights; recompute only for old JSONs
+        pred_time = trial.get('predicted')
+        if pred_time is None:
+            pred_time = predict_leave_time_monte_carlo(trial, agent, get_investment_reward_prob, num_simulations=100)
         actual_time = trial['times'][-1]
 
         results.append({
@@ -754,12 +784,16 @@ def compile_all_animal_predictions(animal_ids, num_mc_sims=100):
         # 3. Generate predictions
         print(f"   Running {num_mc_sims} Monte Carlo simulations for {len(trials)} trials...")
         for trial in trials:
-            pred_time = predict_leave_time_monte_carlo(
-                trial,
-                agent,
-                get_investment_reward_prob,
-                num_simulations=num_mc_sims
-            )
+            # Use the prediction stored at extraction (trial-onset weights). Recomputing with the final
+            # agent would be wrong in 'learning' mode, so only do it for old JSONs without predictions.
+            pred_time = trial.get('predicted')
+            if pred_time is None:
+                pred_time = predict_leave_time_monte_carlo(
+                    trial,
+                    agent,
+                    get_investment_reward_prob,
+                    num_simulations=num_mc_sims
+                )
             actual_time = trial['times'][-1]
 
             # Append to the master list (Added 'animal_id' for data tracking!)
@@ -768,7 +802,8 @@ def compile_all_animal_predictions(animal_ids, num_mc_sims=100):
                 'session_id': trial.get('session_id'),
                 'actual': actual_time,
                 'predicted': pred_time,
-                'context': trial['context']
+                'context': trial['context'],
+                'test_alpha_mode': trial.get('test_alpha_mode', 'frozen')
             })
 
         print(f"   ✅ {animal_id} complete.")
