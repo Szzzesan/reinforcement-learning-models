@@ -13,7 +13,7 @@ from tqdm import tqdm
 from joblib import Parallel, delayed
 import multiprocessing
 from src.mouse_playback_agent import MousePlaybackAgent
-from src.data_loader import load_pooled_transitions
+from src.data_loader import load_pooled_transitions, load_pooled_transitions_cached
 import src.config as config
 
 from src.rl_config import AGENT_INFO_TEMPLATE
@@ -241,20 +241,34 @@ def quick_mc_predict(trial_data, agent, dt=0.1, max_extrap=20.0, num_sims=5):
     return sum(sim_leaves) / len(sim_leaves)
 
 
+def _unpack_params(params):
+    """Accepts (alpha, gamma) or (alpha, gamma, lambda). Lambda falls back to the agent default when absent."""
+    if len(params) == 3:
+        alpha, gamma, lam = params
+    else:
+        alpha, gamma = params
+        lam = None
+    return alpha, gamma, lam
+
+
+def _build_agent_info(alpha, gamma, lam=None):
+    info = AGENT_INFO_TEMPLATE.copy()
+    info['step_size'] = alpha
+    info['discount'] = gamma
+    if lam is not None:
+        info['lambda'] = lam
+    return info
+
+
 # --- THE NEW OPTIMIZATION METRIC ---
 def calculate_leave_time_error(params, transitions, num_sessions=10):
     """
     Trains the agent and evaluates Mean Squared Error (MSE)
     between Actual and Predicted leave times in the final N sessions.
     """
-    alpha, gamma = params
+    alpha, gamma, lam = _unpack_params(params)
+    info = _build_agent_info(alpha, gamma, lam)
 
-    # Init Agent
-    info = AGENT_INFO_TEMPLATE.copy()
-    info['step_size'] = alpha
-    info['discount'] = gamma
-
-    # ASSUMING MousePlaybackAgent is imported/available in your script
     agent = MousePlaybackAgent()
     agent.agent_init(info)
 
@@ -280,7 +294,7 @@ def calculate_leave_time_error(params, transitions, num_sessions=10):
     agent.agent_start(transitions[0][0])
 
     for i in range(len(transitions)):
-        obs_t, _, reward, obs_next, terminal = transitions[i]
+        obs_t, _, reward, obs_next, terminal = transitions[i][:5]  # [:5] tolerates the 6th 'info' element
 
         v_current = agent.get_value(obs_t)
 
@@ -340,18 +354,28 @@ def calculate_leave_time_error(params, transitions, num_sessions=10):
 
 
 def calculate_leave_time_error_postsurg_only(params, transitions):
-    """
-    Trains the agent and evaluates Mean Squared Error (MSE)
-    between Actual and Predicted leave times in 'post-surgery' sessions.
-    """
-    alpha, gamma = params
+    """Kept for exp_02 reproducibility: scores 'post-surgery' sessions only."""
+    return calculate_leave_time_error_by_session_type(params, transitions, score_session_type='post-surgery')
 
-    # Init Agent
-    info = AGENT_INFO_TEMPLATE.copy()
-    info['step_size'] = alpha
-    info['discount'] = gamma
 
-    # ASSUMING MousePlaybackAgent is imported/available in your script
+def calculate_leave_time_error_by_session_type(params, transitions, score_session_type='pre-surgery', mc_seed=43):
+    """
+    Replays ALL transitions through the agent (weights update on every step) and evaluates the
+    Mean Squared Error between actual and MC-predicted leave times, scoring only trials that belong
+    to sessions of `score_session_type` ('pre-surgery' or 'post-surgery').
+
+    Prequential by construction: each trial is predicted with the weights the agent had built up
+    from all earlier transitions.
+
+    params: (alpha, gamma) or (alpha, gamma, lambda).
+    mc_seed: re-seeds the MC rollouts so every parameter combination sees the same random reward
+             draws (common random numbers) -> MSE differences reflect the parameters, not MC noise,
+             and results are identical whether the grid runs serially or in parallel.
+    """
+    random.seed(mc_seed)
+    alpha, gamma, lam = _unpack_params(params)
+    info = _build_agent_info(alpha, gamma, lam)
+
     agent = MousePlaybackAgent()
     agent.agent_init(info)
 
@@ -373,8 +397,8 @@ def calculate_leave_time_error_postsurg_only(params, transitions):
         v_current = agent.get_value(obs_t)
         is_gambling = is_investment_state(obs_t)
 
-        # Only evaluate predictions if this transition belongs to a post-surgery session
-        if transition_info['session_type'] == 'post-surgery':
+        # Only evaluate predictions if this transition belongs to a session of the scored type
+        if transition_info['session_type'] == score_session_type:
             if is_gambling:
                 if not in_gambling_trial:
                     in_gambling_trial = True
@@ -413,7 +437,7 @@ def calculate_leave_time_error_postsurg_only(params, transitions):
 
                     in_gambling_trial = False
         else:
-            # Ensure the tracking variables stay clean during pre-surgery phases
+            # Ensure the tracking variables stay clean during unscored phases
             in_gambling_trial = False
 
         # Standard Learning Step (Agent updates its weights on ALL transitions)
@@ -580,6 +604,38 @@ def get_next_gammas(best_g, prev_gammas):
     return sorted(final_grid)
 
 
+def get_next_lambdas(best_l, prev_lambdas, min_lambda=0.0, max_lambda=1.0, min_step=0.05):
+    """
+    Calculates the next lambda grid (same shrink-by-1/3 logic as get_next_gammas), bounded [0, 1].
+    min_step is coarser than gamma's 0.01 because lambda is only weakly identified by leave times
+    (it trades off against gamma through gamma*lambda), so very fine lambda steps just burn rounds.
+    """
+    prev_lambdas = sorted(list(set(prev_lambdas)))
+    idx = prev_lambdas.index(best_l)
+
+    if len(prev_lambdas) >= 2:
+        if idx == 0:
+            d = prev_lambdas[1] - prev_lambdas[0]
+        elif idx == len(prev_lambdas) - 1:
+            d = prev_lambdas[-1] - prev_lambdas[-2]
+        else:
+            d = min(best_l - prev_lambdas[idx - 1], prev_lambdas[idx + 1] - best_l)
+    else:
+        d = 0.3
+
+    new_step = max(min_step, round(d / 3.0, 2))
+
+    next_grid = [best_l - new_step, best_l, best_l + new_step]
+
+    final_grid = []
+    for l in next_grid:
+        l_clamped = max(min_lambda, min(max_lambda, round(l, 2)))
+        if l_clamped not in final_grid:
+            final_grid.append(l_clamped)
+
+    return sorted(final_grid)
+
+
 def save_grid_results(results, filename_base):
     """
     Saves grid search results to both CSV and JSON formats.
@@ -618,40 +674,49 @@ def save_best_params(data, filename_base):
     df.to_csv(filepath, index=True)
 
 
-def process_animal(animal_id, parameter_dict):
+def _evaluate_grid_point(data_folder, animal_id, a, g, l, score_session_type):
+    """One grid point. Runs inside a joblib worker; transitions are loaded once per worker and cached."""
+    transitions = load_pooled_transitions_cached(data_folder, animal_id)
+    mse_error = calculate_leave_time_error_by_session_type([a, g, l], transitions,
+                                                           score_session_type=score_session_type)
+    return {'alpha': a, 'gamma': g, 'lambda': l, 'mse': mse_error}
+
+
+def process_animal(animal_id, parameter_dict, score_session_type='pre-surgery', n_jobs=1):
+    """
+    Runs one grid round over every (alpha, gamma, lambda) combination for one animal.
+    parameter_dict: {'alphas': [...], 'gammas': [...], 'lambdas': [...]}
+    n_jobs: number of parallel worker processes (each holds its own copy of the transitions in RAM).
+    """
     # --- PATH SETUP ---
     PROJECT_ROOT = config.MODELING_PROJECT_ROOT
     DATA_FOLDER = os.path.join(PROJECT_ROOT, config.MODELING_DATA_SUBDIR)
     RESULTS_FOLDER = os.path.join(PROJECT_ROOT, config.STEP1_PARAMETER_FITTING_SUBDIR)
     Path(RESULTS_FOLDER).mkdir(parents=True, exist_ok=True)
 
-    all_transitions = load_pooled_transitions(DATA_FOLDER, animal_id)
     alphas = parameter_dict['alphas']
     gammas = parameter_dict['gammas']
+    lambdas = parameter_dict['lambdas']
 
-    combinations = list(product(alphas, gammas))
-    grid_results = []
+    combinations = list(product(alphas, gammas, lambdas))
 
-    print("Starting Grid Search...")
-    with tqdm(total=len(combinations), desc=f"🔍 {animal_id} Grid", leave=False, unit="pair") as pbar:
-        for a, g in combinations:
-            # nvg = calculate_normalized_value_gap([a, g], all_transitions)
-            mse_error = calculate_leave_time_error_postsurg_only([a, g], all_transitions)
+    print(f"Starting Grid Search: {len(combinations)} combinations on {n_jobs} worker(s)...")
+    grid_results = Parallel(n_jobs=n_jobs, verbose=10)(
+        delayed(_evaluate_grid_point)(DATA_FOLDER, animal_id, a, g, l, score_session_type)
+        for a, g, l in combinations
+    )
 
-            print(f"Alpha: {a:.4f}, Gamma: {g:.2f} | Avg MSE: {mse_error:.4f}")
-            grid_results.append({'alpha': a, 'gamma': g, 'mse': mse_error})
+    for r in grid_results:
+        print(f"Alpha: {r['alpha']:.4f}, Gamma: {r['gamma']:.2f}, Lambda: {r['lambda']:.2f} | Avg MSE: {r['mse']:.4f}")
 
-            # Update the progress bar to show which combination just finished and its MSE
-            pbar.set_postfix(a=f"{a:.5f}", g=f"{g:.2f}", mse=f"{mse_error:.4f}")
-            pbar.update(1)
-
-    # 2. Find the best pair
+    # 2. Find the best combination
     grid_df = pd.DataFrame(grid_results)
     best_row = grid_df.loc[grid_df['mse'].idxmin()]
 
     print("\n--- ROUND WINNER ---")
     print(f"Best Alpha: {best_row['alpha']}")
     print(f"Best Gamma: {best_row['gamma']}")
+    print(f"Best Lambda: {best_row['lambda']}")
     print(f"Lowest MSE: {best_row['mse']}")
     return best_row, grid_df
 
@@ -833,65 +898,97 @@ def verify_exit_states(animal_id="SZ036", num_trials=15):
                 break
 
 
-def main():
-    # --- PATH SETUP ---
-    animal_list = ["SZ036", "SZ037", "SZ038", "SZ039", "SZ042", "SZ043", "RK007", "RK008"]
-    # animal_list = ["SZ036"]
-    # Define the Grid
-    # alphas = [0.0005]
-    # gammas = [0.55, 0.65, 0.75, 0.85, 0.95]
-    # parameter_dict = {'alphas': alphas, 'gammas': gammas}
-    # best_params = {}
-    MAX_ROUNDS = 4
+# --- exp_05 search settings ---
+MAX_ROUNDS = 4
+ROUND1_ALPHAS = [0.0001, 0.001, 0.01]
+ROUND1_GAMMAS = [0.5, 0.7, 0.9, 0.95, 0.98, 0.99]  # extended top end: exp_01 fits piled up at the old 0.9 edge
+ROUND1_LAMBDAS = [0.0, 0.5, 0.9]
+SCORE_SESSION_TYPE = 'pre-surgery'  # prequential MSE over pre-surgery trials; post-surgery training sessions replayed, not scored
+# Each worker holds one animal's transitions in RAM (~0.5 GB for RK008, ~1.2 GB for SZ036/SZ037).
+# Lower this if your machine starts swapping.
+N_JOBS = max(1, min(multiprocessing.cpu_count() - 1, 6))
+
+
+def load_best_params_if_exists(filename_base="best_params"):
+    """Loads an existing best_params.pkl for the active experiment so re-runs of a subset of animals merge in."""
+    filepath = os.path.join(config.MODELING_PROJECT_ROOT, config.STEP1_PARAMETER_FITTING_SUBDIR, f"{filename_base}.pkl")
+    if os.path.exists(filepath):
+        with open(filepath, 'rb') as f:
+            return pickle.load(f)
+    return {}
+
+
+def main(animal_list=None):
+    if animal_list is None:
+        animal_list = ["SZ036", "SZ037", "SZ038", "SZ039", "SZ042", "SZ043", "RK007", "RK008"]
+
+    best_params = load_best_params_if_exists()
 
     main_pbar = tqdm(animal_list, desc="🧬 Total Cohort Progress", unit="animal")
     for animal in main_pbar:
         main_pbar.set_postfix(current_animal=animal)
         try:
             # --- ROUND 1 (Coarse Map) ---
-            current_alphas = [0.0001, 0.001, 0.01]
-            current_gammas = [0.5, 0.7, 0.9]
+            current_alphas = list(ROUND1_ALPHAS)
+            current_gammas = list(ROUND1_GAMMAS)
+            current_lambdas = list(ROUND1_LAMBDAS)
+            overall_best = None
 
             for round_num in range(1, MAX_ROUNDS + 1):
 
                 print(f"\n🚀 --- {animal} | COARSE-TO-FINE ROUND {round_num} ---")
                 print(f"Testing Alphas: {current_alphas}")
                 print(f"Testing Gammas: {current_gammas}")
+                print(f"Testing Lambdas: {current_lambdas}")
 
-                parameter_dict = {'alphas': current_alphas, 'gammas': current_gammas}
+                parameter_dict = {'alphas': current_alphas, 'gammas': current_gammas, 'lambdas': current_lambdas}
 
                 # 1. Run the search
-                best_row, grid_results = process_animal(animal, parameter_dict)
+                best_row, grid_results = process_animal(animal, parameter_dict,
+                                                        score_session_type=SCORE_SESSION_TYPE, n_jobs=N_JOBS)
 
                 # 2. Save results uniquely for this round
                 save_filename = f"mse_search_{animal}_round{round_num}"
                 save_grid_results(grid_results, save_filename)
 
+                if overall_best is None or best_row['mse'] < overall_best['mse']:
+                    overall_best = best_row
+
                 best_a = best_row['alpha']
                 best_g = best_row['gamma']
+                best_l = best_row['lambda']
 
                 # 3. Calculate grids for the NEXT round
                 next_alphas = get_next_alphas(best_a, current_alphas)
                 next_gammas = get_next_gammas(best_g, current_gammas)
+                next_lambdas = get_next_lambdas(best_l, current_lambdas)
 
                 # 4. Convergence Check
-                # If the grid can't shrink anymore (due to our decimal limits), we are done!
-                if next_alphas == current_alphas and next_gammas == current_gammas:
+                if next_alphas == current_alphas and next_gammas == current_gammas and next_lambdas == current_lambdas:
                     print(f"✅ Search converged for {animal} at Round {round_num}!")
-                    print(f"🏆 Ultimate Best -> Alpha: {best_a}, Gamma: {best_g}")
                     break
 
-                # Otherwise, prepare for the next round
                 current_alphas = next_alphas
                 current_gammas = next_gammas
+                current_lambdas = next_lambdas
+
+            print(f"🏆 {animal} best -> Alpha: {overall_best['alpha']}, Gamma: {overall_best['gamma']}, "
+                  f"Lambda: {overall_best['lambda']}, MSE: {overall_best['mse']:.4f}")
+            best_params[animal] = pd.Series(
+                [overall_best['alpha'], overall_best['gamma'], overall_best['lambda'], overall_best['mse']],
+                index=["alpha", "gamma", "lambda", "mse"])
+            # Save after every animal so a crash doesn't lose finished fits
+            save_best_params(best_params, "best_params")
 
         except Exception as e:
             tqdm.write(f"❌ Error processing {animal}: {e}")
 
+    return best_params
+
 
 # --- MAIN BLOCK ---
 if __name__ == "__main__":
-    # main()
+    main()
 
     # --- QUICK VALIDATION ---
     # PROJECT_ROOT = config.MODELING_PROJECT_ROOT
@@ -904,17 +1001,17 @@ if __name__ == "__main__":
     # agent_info["discount"] = 0.9
     # validate_leave_time_error_visual(transitions, agent_info, test_alphas=[0.001, 0.006], num_trials=10)
 
-    # --- TEMPORARY: SAVE THE BEST PARAMETERS ---
-    best_params = {
-        "SZ036": pd.Series([0.006, 0.9, 5.63], index=["alpha", "gamma", "mse"]),  # alpha, gamma, nvg^2
-        "SZ037": pd.Series([0.0012, 0.72, 9.89], index=["alpha", "gamma", "mse"]),
-        "SZ038": pd.Series([0.0002, 0.51, 9.16], index=["alpha", "gamma", "mse"]),
-        "SZ039": pd.Series([0.003, 0.89, 6.71], index=["alpha", "gamma", "mse"]),
-        "SZ042": pd.Series([0.0009, 0.64, 10.02], index=["alpha", "gamma", "mse"]),
-        "SZ043": pd.Series([0.0009, 0.72, 9.06], index=["alpha", "gamma", "mse"]),
-        "RK007": pd.Series([0.01, 0.8, 15.70], index=["alpha", "gamma", "mse"]),
-        "RK008": pd.Series([0.006, 0.81, 11.85], index=["alpha", "gamma", "mse"]),
-    }
-    save_best_params(best_params, f"best_params")
+    # --- (exp_01-era) HAND-ENTERED BEST PARAMETERS: disabled, main() now writes best_params itself ---
+    # best_params = {
+    #     "SZ036": pd.Series([0.006, 0.9, 5.63], index=["alpha", "gamma", "mse"]),  # alpha, gamma, nvg^2
+    #     "SZ037": pd.Series([0.0012, 0.72, 9.89], index=["alpha", "gamma", "mse"]),
+    #     "SZ038": pd.Series([0.0002, 0.51, 9.16], index=["alpha", "gamma", "mse"]),
+    #     "SZ039": pd.Series([0.003, 0.89, 6.71], index=["alpha", "gamma", "mse"]),
+    #     "SZ042": pd.Series([0.0009, 0.64, 10.02], index=["alpha", "gamma", "mse"]),
+    #     "SZ043": pd.Series([0.0009, 0.72, 9.06], index=["alpha", "gamma", "mse"]),
+    #     "RK007": pd.Series([0.01, 0.8, 15.70], index=["alpha", "gamma", "mse"]),
+    #     "RK008": pd.Series([0.006, 0.81, 11.85], index=["alpha", "gamma", "mse"]),
+    # }
+    # save_best_params(best_params, f"best_params")
 
     # verify_exit_states(animal_id="SZ036", num_trials=15)

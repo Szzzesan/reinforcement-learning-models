@@ -1,11 +1,12 @@
 import os
 import json
+from datetime import datetime
 
 # ==========================================
 # 1. SET ACTIVE EXPERIMENT HERE
 # ==========================================
 # Change this single variable to switch the entire pipeline's context
-ACTIVE_EXP_ID = "exp_01"
+ACTIVE_EXP_ID = "exp_05"
 
 # ==========================================
 # 2. PROJECT ROOT & EXPERIMENT CONFIGURATIONS
@@ -33,6 +34,14 @@ EXPERIMENTS = {
         "split_method": "mixed_40_percent",
         "tiling_method": "uniform",
         "description": "Train includes all pre-surgery + first 40% post-surgery. Uniform tiling."
+    },
+    "exp_05": {
+        "split_method": "holdout_last_10",
+        "tiling_method": "uniform",
+        "description": ("Chronological holdout: the last 10 sessions (all post-surgery) are the target set and are never "
+                        "seen during fitting. alpha, gamma and lambda are fit on prequential leave-time MSE over "
+                        "pre-surgery trials only; early post-surgery training sessions are replayed but not scored. "
+                        "Uniform tiling.")
     }
 }
 
@@ -62,7 +71,22 @@ DIR_OUTPUTS = os.path.join(BASE_DIR_OUTPUTS, FOLDER_SUFFIX)
 DIR_MODEL_FITTING = os.path.join(DIR_OUTPUTS, "1_model_fitting")
 DIR_TRAINED_AGENTS = os.path.join(DIR_OUTPUTS, "2_trained_agents")
 DIR_EVAL_METRICS = os.path.join(DIR_OUTPUTS, "3_evaluation_metrics")
-DIR_FIGURES = os.path.join(DIR_OUTPUTS, "4_figures")
+DIR_STEP4_OUTPUTS = os.path.join(DIR_OUTPUTS, "4_outputs")  # figures + result tables, one dated subfolder per run day
+DIR_FIGURES = DIR_STEP4_OUTPUTS  # old name kept so existing imports keep working
+
+# Fixed once at import, so a run that crosses midnight still writes into a single folder
+RUN_DATE = datetime.now().strftime("%Y_%m_%d")
+
+
+def get_dated_output_dir(*subdirs):
+    """
+    Returns (and creates) outputs/<exp>/4_outputs/<YYYY_MM_DD>/<subdirs...> for the active experiment,
+    e.g. get_dated_output_dir() -> .../4_outputs/2026_09_23
+         get_dated_output_dir("leave_time_by_session", "SZ036") -> .../4_outputs/2026_09_23/leave_time_by_session/SZ036
+    """
+    path = os.path.join(DIR_STEP4_OUTPUTS, RUN_DATE, *subdirs)
+    os.makedirs(path, exist_ok=True)
+    return path
 
 def initialize_active_experiment():
     """Creates the necessary directories for the currently active experiment."""
@@ -75,7 +99,7 @@ def initialize_active_experiment():
     os.makedirs(DIR_MODEL_FITTING, exist_ok=True)
     os.makedirs(DIR_TRAINED_AGENTS, exist_ok=True)
     os.makedirs(DIR_EVAL_METRICS, exist_ok=True)
-    os.makedirs(DIR_FIGURES, exist_ok=True)
+    os.makedirs(DIR_STEP4_OUTPUTS, exist_ok=True)
 
     # Save config to outputs
     config_path = os.path.join(DIR_OUTPUTS, "exp_config.json")

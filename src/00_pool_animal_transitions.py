@@ -253,6 +253,17 @@ def main():
             train_sessions = annotated_pre + annotated_post[:split_idx]
             target_sessions = annotated_post[split_idx:]
 
+        elif split_method.startswith("holdout_last_"):
+            # Chronological holdout: the last N sessions (pre + post pooled, sorted by date) are the target set.
+            n_holdout = int(split_method.rsplit("_", 1)[-1])
+            if n_holdout >= len(all_sessions):
+                raise ValueError(f"{animal}: cannot hold out {n_holdout} of {len(all_sessions)} sessions.")
+            train_sessions = all_sessions[:-n_holdout]
+            target_sessions = all_sessions[-n_holdout:]
+            n_pre_in_target = sum(s['type'] == 'pre-surgery' for s in target_sessions)
+            if n_pre_in_target > 0:
+                print(f"⚠️ {animal}: {n_pre_in_target} pre-surgery session(s) fall inside the holdout window.")
+
         else:
             raise ValueError(f"Unknown split_method configured: {split_method}")
 

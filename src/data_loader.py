@@ -412,6 +412,22 @@ def load_pooled_transitions(data_folder, animal_id, type='pretraining'):
         return None
 
 
+# Module-level cache so that parallel (joblib/loky) workers load an animal's transitions once and
+# reuse them across all grid points, instead of re-reading the pickle for every (alpha, gamma, lambda).
+# It lives here (an importable module) rather than in 01_model_fitting.py because functions defined in
+# a __main__ script are shipped to workers by value, which would give each task a fresh, empty cache.
+_POOLED_TRANSITIONS_CACHE = {}
+
+
+def load_pooled_transitions_cached(data_folder, animal_id, type='pretraining'):
+    """Same as load_pooled_transitions, but keeps only the most recent animal in memory per process."""
+    key = (str(data_folder), animal_id, type)
+    if key not in _POOLED_TRANSITIONS_CACHE:
+        _POOLED_TRANSITIONS_CACHE.clear()  # hold one animal at a time (~0.5-1.5 GB each)
+        _POOLED_TRANSITIONS_CACHE[key] = load_pooled_transitions(data_folder, animal_id, type=type)
+    return _POOLED_TRANSITIONS_CACHE[key]
+
+
 def load_and_concat_population_data(animal_ids, file_name):
     """
     Loads 'tde_reward_features_{animal_id}.parquet' for each animal in the list

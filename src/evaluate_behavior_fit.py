@@ -1,9 +1,11 @@
 import json
 import numpy as np
+import pandas as pd
 from pathlib import Path
 from scipy.stats import pearsonr
 from src.plot_state_value_trajectories import load_master_predictions
 import src.config
+from src.current_experiment_config import get_dated_output_dir
 
 
 def _extract_valid_arrays(results):
@@ -105,6 +107,46 @@ def evaluate_by_animal_and_context(results):
     return nested_eval
 
 
+def evaluate_by_animal_and_session(results):
+    """Evaluates metrics for each target session, within each animal (needs 'session_id' in the master predictions)."""
+    out = {}
+    for animal in sorted(set(r.get('animal_id') for r in results if 'animal_id' in r)):
+        sessions = sorted(set(r.get('session_id') for r in results
+                              if r.get('animal_id') == animal and r.get('session_id') is not None))
+        out[animal] = {sid: evaluate_subset([r for r in results
+                                             if r.get('animal_id') == animal and r.get('session_id') == sid])
+                       for sid in sessions}
+    return out
+
+
+def build_evaluation_table(results):
+    """
+    Collects every evaluation level into one long table:
+    level | animal_id | context | session_id | N_trials | MAE | Pearson_r | p_value
+    """
+    rows = [dict(level='global', **evaluate_subset(results))]
+    for ctx, m in evaluate_by_context(results).items():
+        rows.append(dict(level='context', context=ctx, **m))
+    for animal, m in evaluate_by_animal(results).items():
+        rows.append(dict(level='animal', animal_id=animal, **m))
+    for animal, ctx_dict in evaluate_by_animal_and_context(results).items():
+        for ctx_name, m in ctx_dict.items():
+            rows.append(dict(level='animal_context', animal_id=animal, context=ctx_name.replace('Context_', ''), **m))
+    for animal, sess_dict in evaluate_by_animal_and_session(results).items():
+        for sid, m in sess_dict.items():
+            rows.append(dict(level='animal_session', animal_id=animal, session_id=sid, **m))
+    cols = ['level', 'animal_id', 'context', 'session_id', 'N_trials', 'MAE', 'Pearson_r', 'p_value']
+    return pd.DataFrame(rows).reindex(columns=cols)
+
+
+def save_evaluation_table(results, filename="behavior_fit_evaluation.csv"):
+    """Saves the full evaluation table to outputs/<exp>/4_outputs/<YYYY_MM_DD>/."""
+    save_file = Path(get_dated_output_dir()) / filename
+    build_evaluation_table(results).to_csv(save_file, index=False)
+    print(f"💾 Evaluation table saved to {save_file}")
+    return save_file
+
+
 if __name__ == "__main__":
     print("Loading master predictions...")
     master_data = load_master_predictions()
@@ -141,3 +183,6 @@ if __name__ == "__main__":
                 print(
                     f"  └─ {ctx_name}: MAE={metrics['MAE']:.3f}s | r={metrics['Pearson_r']:.3f} (n={metrics['N_trials']})")
         print("=" * 50)
+
+        # Per-session metrics are written to the table only (80 rows is too much to print)
+        save_evaluation_table(master_data)

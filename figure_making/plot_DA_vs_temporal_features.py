@@ -17,6 +17,7 @@ from matplotlib.transforms import ScaledTranslation
 
 from src.data_loader import load_and_concat_population_data
 import src.config as config
+from src.current_experiment_config import get_dated_output_dir
 
 
 def run_td_error_lmem_analysis(td_df):
@@ -703,7 +704,7 @@ def make_figure(master_df):
     plt.tight_layout()
     plt.show()
 
-    return fig, axes
+    return fig, axes, model_results
 
 
 def save_publication_figure(fig, filename="composite_summary_figure.png", save_folder="figures", dpi=300):
@@ -735,6 +736,18 @@ def save_publication_figure(fig, filename="composite_summary_figure.png", save_f
     print("✅ Figure saved successfully!")
 
 
+def save_lmem_results(model_results, save_folder, filename_base="td_error_lmem"):
+    """Saves the TD-error LMEM summary (text) and its coefficient table (CSV) next to the figure."""
+    save_folder = Path(save_folder)
+    summary = model_results.summary()
+    with open(save_folder / f"{filename_base}_summary.txt", 'w') as f:
+        f.write(str(summary))
+    # MixedLM's summary is a summary2.Summary; tables[1] is the coefficient table as a DataFrame
+    # (fixed effects plus the random-effect variance rows, exactly as printed).
+    summary.tables[1].to_csv(save_folder / f"{filename_base}_coefficients.csv", index_label='term')
+    print(f"💾 LMEM summary and coefficients saved to {save_folder}")
+
+
 def main():
     SZ_animals = ['SZ036', 'SZ037', 'SZ038', 'SZ039', 'SZ042', 'SZ043']
     RK_animals = ['RK007', 'RK008']
@@ -753,11 +766,11 @@ if __name__ == "__main__":
     master_df = load_and_concat_population_data(animal_ids=animal_list, file_name="tde_reward_features")
 
     if not master_df.empty:
-        fig, axes = make_figure(master_df)
-        project_root = Path(config.MODELING_PROJECT_ROOT)
-        save_folder = project_root / Path(config.STEP4_MODELING_PLOTS_SUBDIR)
+        fig, axes, model_results = make_figure(master_df)
+        save_folder = get_dated_output_dir()  # outputs/<exp>/4_outputs/<YYYY_MM_DD>
 
         save_publication_figure(fig, filename="modeling_tde_vs_reward_features.png", save_folder=save_folder, dpi=300)
+        save_lmem_results(model_results, save_folder)
 
     # fige_DA_vs_NRI_v2(master_df, dodge=True, axes=None)
     # figf_DA_vs_NRI_block_split_v2(master_df, axes=None)

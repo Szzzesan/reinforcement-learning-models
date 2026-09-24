@@ -14,9 +14,10 @@ from src.mouse_playback_agent import MousePlaybackAgent
 
 from src.rl_config import AGENT_INFO_TEMPLATE
 import src.config
+import src.config as config  # batch_train_and_save() and main() refer to `config.`
 
 
-def configure_agent_and_env(pooled_data_file, alpha, gamma):
+def configure_agent_and_env(pooled_data_file, alpha, gamma, lam=None):
     """
     Configures the environment and agent using specific hyperparameters.
     """
@@ -38,6 +39,8 @@ def configure_agent_and_env(pooled_data_file, alpha, gamma):
     agent_params = AGENT_INFO_TEMPLATE.copy()
     agent_params['step_size'] = alpha
     agent_params['discount'] = gamma
+    if lam is not None and not pd.isna(lam):
+        agent_params['lambda'] = lam  # otherwise MousePlaybackAgent falls back to its default (0.95)
 
     # Agent Setup
     agent = MousePlaybackAgent()
@@ -118,7 +121,8 @@ def batch_train_and_save(best_params):
         agent, env = configure_agent_and_env(
             data_file,
             alpha=params['alpha'],
-            gamma=params['gamma']
+            gamma=params['gamma'],
+            lam=params.get('lambda')  # None for older best_params files without lambda
         )
 
         if agent is None:
@@ -160,15 +164,16 @@ def train_agent_for_animal(animal_id, max_epochs=1):
     # Pandas lets us access Series values directly by their string index!
     alpha = best_params_series['alpha']
     gamma = best_params_series['gamma']
+    lam = best_params_series.get('lambda')
 
     data_file = os.path.join(project_root, src.config.MODELING_DATA_SUBDIR, f"pooled_transitions_{animal_id}.pkl")
     save_path = os.path.join(project_root, src.config.STEP2_PRETRAINED_AGENTS_SUBDIR)
     Path(save_path).mkdir(parents=True, exist_ok=True)
 
     print(f"\n🚀 Training agent for {animal_id}...")
-    print(f"Using Params -> Alpha: {alpha:.4f}, Gamma: {gamma:.2f}")
+    print(f"Using Params -> Alpha: {alpha:.4f}, Gamma: {gamma:.2f}, Lambda: {lam}")
 
-    agent, env = configure_agent_and_env(data_file, alpha=alpha, gamma=gamma)
+    agent, env = configure_agent_and_env(data_file, alpha=alpha, gamma=gamma, lam=lam)
 
     if agent is None:
         print(f"❌ Skipping {animal_id} due to missing data.")

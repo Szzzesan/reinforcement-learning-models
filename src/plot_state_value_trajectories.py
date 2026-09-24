@@ -5,6 +5,7 @@ import json
 import copy
 import pickle
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import random
@@ -13,7 +14,22 @@ import tiles3 as tc
 
 from src.state_utils import build_investment_sim_state, build_travel_state, is_investment_state, get_investment_reward_prob
 import src.config as config
+from src.current_experiment_config import get_dated_output_dir
 from mouse_playback_environment import MousePlaybackEnvironment
+
+
+def save_and_show_figure(fig, filename, subdirs=(), show=True, dpi=300):
+    """
+    Saves `fig` to outputs/<exp>/4_outputs/<YYYY_MM_DD>/<subdirs...>/<filename>, then shows it
+    (show=True) or closes it (show=False, used for batches of figures such as the per-session plots).
+    """
+    save_path = Path(get_dated_output_dir(*subdirs)) / filename
+    fig.savefig(save_path, dpi=dpi, bbox_inches='tight', facecolor='white')
+    print(f"💾 Figure saved to {save_path}")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
 
 
 def extract_target_session_trajectories(target_data_file, pretrained_agent_file):
@@ -31,6 +47,9 @@ def extract_target_session_trajectories(target_data_file, pretrained_agent_file)
     with open(target_data_file, 'rb') as f:
         target_transitions_with_meta = pickle.load(f)
     target_transitions = [t[:5] for t in target_transitions_with_meta]
+    # 00 attaches {'session_id', 'session_type'} as a 6th element; keep the session label per step so
+    # every extracted trial knows which session it came from (None if the pickle predates the metadata).
+    session_ids = [t[5].get('session_id') if len(t) > 5 else None for t in target_transitions_with_meta]
 
     # 3. Setup the playback environment
     env = MousePlaybackEnvironment()
@@ -44,6 +63,7 @@ def extract_target_session_trajectories(target_data_file, pretrained_agent_file)
     current_trial_times = []
     current_event_timer = []
     current_context = None
+    current_session_id = None
     last_gambling_obs = None  # To hold the state right before leaving
 
     obs = env.env_start()
@@ -63,6 +83,7 @@ def extract_target_session_trajectories(target_data_file, pretrained_agent_file)
                 current_trial_times = []
                 current_event_timer = []
                 current_context = obs[3]
+                current_session_id = session_ids[step_idx]  # obs at this step is transitions[step_idx][0]
 
             current_trial_vs.append(v_current)
             current_trial_times.append(obs[1])
@@ -80,7 +101,8 @@ def extract_target_session_trajectories(target_data_file, pretrained_agent_file)
                         'event_timer': current_event_timer,
                         'values': current_trial_vs,
                         'context': current_context,
-                        'v_after': v_after_leaving
+                        'v_after': v_after_leaving,
+                        'session_id': current_session_id
                     })
                 in_gambling_trial = False
 
@@ -120,7 +142,7 @@ def load_trajectory_data(animal_id):
         return json.load(f)
 
 
-def plot_target_session_trajectories(trials, animal_id):
+def plot_target_session_trajectories(trials, animal_id, show=True):
     """
     Plots a 5x4 grid of 20 random
     gambling trials, showing the V(s) trajectory and the V(after_leaving) threshold.
@@ -169,11 +191,12 @@ def plot_target_session_trajectories(trials, animal_id):
     # fig.legend(handles, labels, loc='upper right', fontsize=12)
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])  # Adjust for suptitle
-    plt.show()
+    save_and_show_figure(fig, f"value_trajectories_{animal_id}.png", show=show)
 
 
 def plot_target_session_trajectories_with_mc(trials, agent, animal_id, reward_prob_func,
-                                             trial_indices=None, num_mc_traces=10, dt=0.1, max_extrap_s=30):
+                                             trial_indices=None, num_mc_traces=10, dt=0.1, max_extrap_s=30,
+                                             show=True):
     """
     Plots a grid of random gambling trials with shared X and Y axes.
     Runs Monte Carlo rollouts to extrapolate V(s) trajectories if needed.
@@ -211,7 +234,7 @@ def plot_target_session_trajectories_with_mc(trials, agent, animal_id, reward_pr
         threshold = trial['v_after']
 
         # 1. Plot Actual V(s) trajectory
-        ax.plot(trial['times'], trial['values'], color=color, linewidth=2.5, label='Actual V(stay)')
+        ax.plot(trial['times'], trial['values'], color=color, linewidth=2.5, label='Observed V(stay)')
 
         # 2. Plot V(leave) Threshold
         ax.axhline(y=threshold, color='grey', linestyle='--', linewidth=1.5, label='V(leave)')
@@ -278,7 +301,7 @@ def plot_target_session_trajectories_with_mc(trials, agent, animal_id, reward_pr
                     break
 
         # ---> MODIFICATION 2: Draw Actual vs Predicted Vertical Lines <---
-        ax.axvline(actual_time, color='black', alpha=0.8, linestyle='-', label=f'Actual')
+        ax.axvline(actual_time, color='black', alpha=0.8, linestyle='-', label=f'Observed')
         if pred_time is not None:
             ax.axvline(pred_time, color='red', alpha=0.8, linestyle='--', label=f'Predicted')
 
@@ -304,7 +327,7 @@ def plot_target_session_trajectories_with_mc(trials, agent, animal_id, reward_pr
     fig.legend(by_label.values(), by_label.keys(), loc='upper right', fontsize=12)
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.show()
+    save_and_show_figure(fig, f"value_trajectories_with_mc_{animal_id}.png", show=show)
 
 
 def predict_single_trial_leave_time(trial, agent, dt=0.1, max_extrap_s=20.0):
@@ -414,7 +437,8 @@ def predict_leave_time_monte_carlo(trial, agent, get_reward_prob_func, num_simul
     return np.mean(simulated_leave_times)
 
 
-def plot_prediction_results_trial_series(results, animal_id=None):
+def plot_prediction_results_trial_series(results, animal_id=None, title=None, save_name=None,
+                                         save_subdirs=(), show=True):
     # 1. Configuration
     trials_per_axis = 40
     num_total = len(results)
@@ -439,9 +463,9 @@ def plot_prediction_results_trial_series(results, animal_id=None):
         # Create x-axis indices for this block
         x_range = np.arange(start_idx, end_idx)
 
-        # Plot Actual vs Predicted
+        # Plot Observed vs Predicted
         axes[i].plot(x_range, actuals[start_idx:end_idx], 'o-', color='black',
-                     alpha=0.4, label='Actual', markersize=4, linewidth=1)
+                     alpha=0.4, label='Observed', markersize=4, linewidth=1)
 
         axes[i].plot(x_range, predicts[start_idx:end_idx], 's-', color='#D62728',
                      alpha=0.8, label='Predicted', markersize=4, linewidth=1.5)
@@ -453,7 +477,9 @@ def plot_prediction_results_trial_series(results, animal_id=None):
                 axes[i].axvspan(j - 0.5, j + 0.5, color='orange', alpha=0.1)
 
         # Formatting
-        if animal_id is not None:
+        if title is not None:
+            plt.suptitle(title)
+        elif animal_id is not None:
             plt.suptitle(f"Animal {animal_id}")
         axes[i].set_title(f"Trials {start_idx} to {end_idx - 1}")
         axes[i].set_ylabel("Leave Time (s)")
@@ -466,12 +492,14 @@ def plot_prediction_results_trial_series(results, animal_id=None):
             axes[i].set_xlabel("Trial Index")
 
     plt.tight_layout()
-    plt.show()
+    if save_name is None:
+        save_name = f"leave_time_trial_series_{animal_id if animal_id is not None else 'all_animals'}.png"
+    save_and_show_figure(fig, save_name, subdirs=save_subdirs, show=show)
 
 
-def plot_prediction_results_scatters(results, jitter_amount=0.04, animal_id=None):
+def plot_prediction_results_scatters(results, jitter_amount=0.04, animal_id=None, show=True):
     """
-    Plots Predicted vs. Actual leave times with Jitter.
+    Plots Predicted vs. Observed leave times with Jitter.
     Includes regression lines with R-squared and equation annotations
     rotated to match the line angle.
     """
@@ -565,7 +593,7 @@ def plot_prediction_results_scatters(results, jitter_amount=0.04, animal_id=None
     ax.set_aspect('equal', adjustable='box')
 
     ax.legend(title='Context Block', loc='upper left')
-    ax.set_xlabel('Actual Leave Time (s)')
+    ax.set_xlabel('Observed Leave Time (s)')
     ax.set_ylabel('Predicted Leave Time (s)')
     if animal_id is not None:
         ax.set_title(f"Animal {animal_id}")
@@ -573,12 +601,42 @@ def plot_prediction_results_scatters(results, jitter_amount=0.04, animal_id=None
     ax.grid(True, linestyle='--', alpha=0.2)
 
     plt.tight_layout()
-    plt.show()
+    save_and_show_figure(fig, f"leave_time_scatter_{animal_id if animal_id is not None else 'all_animals'}.png",
+                         show=show)
 
 
-def evaluate_frozen_trajectories_for_animal(animal_id):
+def plot_prediction_results_by_session(results, animal_id, show=False):
+    """
+    One leave-time-vs-trial figure per target session (same layout as plot_prediction_results_trial_series).
+    Saved to 4_outputs/<date>/leave_time_by_session/<animal_id>/. Figures are closed after saving by default
+    (8 animals x 10 sessions would otherwise open 80 windows).
+    """
+    session_ids = [r.get('session_id') for r in results]
+    if all(s is None for s in session_ids):
+        print(f"   ⚠️ {animal_id}: trials carry no session_id; re-extract with force_extract=True.")
+        return
+
+    ordered_sessions = sorted(set(s for s in session_ids if s is not None))
+    for k, sid in enumerate(ordered_sessions, start=1):
+        session_results = [r for r in results if r.get('session_id') == sid]
+        plot_prediction_results_trial_series(
+            session_results,
+            animal_id=animal_id,
+            title=f"{animal_id} | session {sid} (target session {k}/{len(ordered_sessions)})",
+            save_name=f"leave_time_trial_series_{animal_id}_session{sid:02d}.png",
+            save_subdirs=("leave_time_by_session", animal_id),
+            show=show,
+        )
+
+
+def evaluate_frozen_trajectories_for_animal(animal_id, force_extract=False, make_plots=True):
     """
     Pipeline-ready wrapper to execute the full frozen evaluation for one animal.
+
+    force_extract: re-run the frozen agent over the target sessions even if the trajectory JSON exists.
+                   (Extraction always runs when the JSON is missing, e.g. for a new experiment folder.)
+    make_plots: per-animal MC predictions + trial-series/scatter figures. Off in the batch loop below,
+                because STEP 2 (compile_all_animal_predictions) redoes the predictions for all animals.
     """
     project_root = Path(config.MODELING_PROJECT_ROOT)
     DATA_FOLDER = project_root / Path(config.MODELING_DATA_SUBDIR)
@@ -591,10 +649,20 @@ def evaluate_frozen_trajectories_for_animal(animal_id):
         print(f"❌ Cannot evaluate: Pretrained agent for {animal_id} not found.")
         return
 
-    # 1. Extract and Save
-    # trials = extract_target_session_trajectories(target_data_file, pretrained_agent_file)
-    # if trials:
-    #     save_trajectory_data(trials, animal_id)
+    # 1. Extract and Save (only if missing, unless forced)
+    traj_file = project_root / Path(config.STEP3_EVALUATION_METRICS_SUBDIR) / f"target_session_value_trajectory_{animal_id}.json"
+    if force_extract or not traj_file.exists():
+        trials = extract_target_session_trajectories(target_data_file, pretrained_agent_file)
+        if trials:
+            save_trajectory_data(trials, animal_id)
+        else:
+            print(f"❌ No gambling trials extracted for {animal_id}.")
+            return
+    else:
+        print(f"⚡ Trajectory JSON already exists for {animal_id}, skipping extraction.")
+
+    if not make_plots:
+        return
 
     # 2. Load Agent and Freeze it
     with open(pretrained_agent_file, 'rb') as f:
@@ -603,6 +671,10 @@ def evaluate_frozen_trajectories_for_animal(animal_id):
 
     # 3. Load Trials and Plot
     trials = load_trajectory_data(animal_id)
+    if trials and 'session_id' not in trials[0]:
+        print(f"   ↻ {animal_id}: trajectory JSON has no session labels, re-extracting...")
+        trials = extract_target_session_trajectories(target_data_file, pretrained_agent_file)
+        save_trajectory_data(trials, animal_id)
 
     # plot_target_session_trajectories_with_mc(
     #     trials, agent, animal_id,
@@ -620,11 +692,16 @@ def evaluate_frozen_trajectories_for_animal(animal_id):
         results.append({
             'actual': actual_time,
             'predicted': pred_time,
-            'context': trial['context']
+            'context': trial['context'],
+            'session_id': trial.get('session_id')
         })
 
-    plot_prediction_results_trial_series(results, animal_id=animal_id)
+    pd.DataFrame(results).to_csv(Path(get_dated_output_dir("leave_time_predictions")) /
+                                 f"leave_time_predictions_{animal_id}.csv", index_label='trial_index')
+
+    # plot_prediction_results_trial_series(results, animal_id=animal_id)
     plot_prediction_results_scatters(results, jitter_amount=0.04, animal_id=animal_id)
+    plot_prediction_results_by_session(results, animal_id=animal_id, show=False)
 
 
 def compile_all_animal_predictions(animal_ids, num_mc_sims=100):
@@ -677,6 +754,7 @@ def compile_all_animal_predictions(animal_ids, num_mc_sims=100):
             # Append to the master list (Added 'animal_id' for data tracking!)
             master_results.append({
                 'animal_id': animal_id,
+                'session_id': trial.get('session_id'),
                 'actual': actual_time,
                 'predicted': pred_time,
                 'context': trial['context']
@@ -691,17 +769,22 @@ def compile_all_animal_predictions(animal_ids, num_mc_sims=100):
 def save_master_predictions(results, filename="master_leave_time_predictions.json"):
     """Caches the master list to the disk so we don't have to recalculate."""
     project_root = Path(config.MODELING_PROJECT_ROOT)
-    save_file = project_root / "outputs" / "3_evaluation_metrics" / filename
+    save_file = project_root / Path(config.STEP3_EVALUATION_METRICS_SUBDIR) / filename  # per-experiment folder
 
     with open(save_file, 'w') as f:
         json.dump(results, f, indent=4)
     print(f"💾 Master predictions saved to {save_file}")
 
+    # Human-readable copy of this run's result table in 4_outputs/<date>/
+    csv_file = Path(get_dated_output_dir()) / filename.replace('.json', '.csv')
+    pd.DataFrame(results).to_csv(csv_file, index=False)
+    print(f"💾 Master predictions table saved to {csv_file}")
+
 
 def load_master_predictions(filename="master_leave_time_predictions.json"):
     """Loads the cached master list instantly."""
     project_root = Path(config.MODELING_PROJECT_ROOT)
-    load_file = project_root / "outputs" / "3_evaluation_metrics" / filename
+    load_file = project_root / Path(config.STEP3_EVALUATION_METRICS_SUBDIR) / filename  # per-experiment folder
 
     if load_file.exists():
         with open(load_file, 'r') as f:
@@ -728,7 +811,7 @@ if __name__ == "__main__":
     for animal in all_animals:
         # This will load the agent, run the target sessions, and save the trajectory JSON.
         # It's fast, so it's safe to run it in a loop.
-        evaluate_frozen_trajectories_for_animal(animal)
+        evaluate_frozen_trajectories_for_animal(animal, force_extract=False, make_plots=True)
 
     print("\n" + "=" * 50)
     print("🧠 STEP 2: Compile Monte Carlo Predictions")
