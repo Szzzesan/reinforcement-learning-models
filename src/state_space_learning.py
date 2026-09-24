@@ -1361,7 +1361,7 @@ if __name__ == "__main__":
     # main_step2('RK008', 'pre-surgery', channels={'reentry_index', 'consumption'})
     # fit, table = main_step3('RK008', 'post-surgery')
     metrics_df = load_metrics_table()
-    for animal_id in ['SZ036', 'SZ037', 'SZ038', 'SZ039', 'SZ042', 'SZ043', 'RK008']:
+    for animal_id in ['SZ036', 'SZ037', 'SZ038', 'SZ039', 'SZ042', 'SZ043', 'RK007', 'RK008']:
         fig, _ = plot_animal_summary(metrics_df, animal_id)
-        fig.savefig(f'plateau_summary_{animal_id}.pdf', bbox_inches='tight')
-        plt.show()
+        fig.savefig(f'plateau_summary_{animal_id}.png', bbox_inches='tight')
+        # plt.show()
